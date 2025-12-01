@@ -10,6 +10,18 @@ Before installing Arcium, ensure you have:
 - **Anchor 0.32.1**: Install from https://www.anchor-lang.com/docs/installation
 - **Docker & Docker Compose**: Required for local testing
 
+## ⚠️ Known Issues / Required Workarounds
+
+> **IMPORTANT: core-utils Version Pinning Required**
+>
+> There is a known bug in the latest Arcium build. Until it is resolved, you **MUST** hardcode the following dependency version in your `Cargo.toml`:
+>
+> ```toml
+> core-utils = { package = "arcium-core-utils", version = "=0.2.18", features = ["dev"] }
+> ```
+>
+> Do not use a newer version or omit the version constraint, as this will cause build failures.
+
 ## Installation
 
 ### Quick Install (Recommended)
