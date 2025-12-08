@@ -1,4 +1,8 @@
-# Arcium Reference Documentation
+# Arcium Reference Documentation (v0.5.1)
+
+> **Version**: This documentation covers Arcium SDK v0.5.1
+> 
+> If migrating from v0.4.x, see the [migration guide](https://docs.arcium.com/developers/migration/migration-v0.4-to-v0.5) for breaking changes.
 
 This reference documentation is designed to help you become an expert in building privacy-preserving applications on Solana using Arcium's Multi-Party Computation (MPC) network.
 

@@ -1,6 +1,8 @@
-# Computation Lifecycle
+# Computation Lifecycle (v0.5.1)
 
 Understanding how computations flow through Arcium is essential for building effective privacy-preserving applications.
+
+> **v0.5.1 Changes**: This document reflects the updated computation flow with BLS signature verification for callbacks.
 
 ## Key Actors
 
@@ -85,22 +87,29 @@ const ciphertext = cipher.encrypt([val1, val2], nonce);
 
 ```rust
 pub fn add_together(ctx: Context<AddTogether>, ...) -> Result<()> {
-    // Build arguments for the encrypted instruction
-    let args = vec![
-        Argument::ArcisPubkey(pub_key),
-        Argument::PlaintextU128(nonce),
-        Argument::EncryptedU8(ciphertext_0),
-        Argument::EncryptedU8(ciphertext_1),
-    ];
+    // v0.5.1: Use ArgBuilder instead of vec![Argument::...]
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pub_key)
+        .plaintext_u128(nonce)
+        .encrypted_u8(ciphertext_0)
+        .encrypted_u8(ciphertext_1)
+        .build();
 
-    // Queue computation for MPC execution
+    // v0.5.1: queue_computation now takes 7 parameters
+    // - callback_ix requires computation_offset and mxe_account
+    // - New cu_price_micro parameter for priority fees
     queue_computation(
         ctx.accounts,
         computation_offset,
         args,
-        None,                                          // Callback server (None = no extra data)
-        vec![AddTogetherCallback::callback_ix(&[])],   // Callback instruction
-        1,                                             // Number of callback transactions
+        None,                                                    // Callback server (None = no extra data)
+        vec![AddTogetherCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[]
+        )?],                                                     // Callback instruction
+        1,                                                       // Number of callback transactions
+        0,                                                       // cu_price_micro: priority fee (0 = standard)
     )?;
     Ok(())
 }
@@ -113,17 +122,26 @@ The Arcium program:
 2. Adds it to the MXE's mempool
 3. MPC cluster nodes fetch and execute using secret sharing
 
-### Step 6: Callback with Result
+### Step 6: Callback with Result (v0.5.1 BLS Verification)
 
 ```rust
+// v0.5.1: Uses SignedComputationOutputs with BLS signature verification
 #[arcium_callback(encrypted_ix = "add_together")]
 pub fn add_together_callback(
     ctx: Context<AddTogetherCallback>,
-    output: ComputationOutputs<AddTogetherOutput>,
+    output: SignedComputationOutputs<AddTogetherOutput>,
 ) -> Result<()> {
-    let o = match output {
-        ComputationOutputs::Success(AddTogetherOutput { field_0 }) => field_0,
-        _ => return Err(ErrorCode::AbortedComputation.into()),
+    // v0.5.1: Must call verify_output() to validate BLS signatures
+    // This ensures the result came from the MXE cluster
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account
+    ) {
+        Ok(AddTogetherOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation verification failed: {}", e);
+            return Err(ErrorCode::AbortedComputation.into())
+        },
     };
 
     // Handle the result (emit event, update state, etc.)
@@ -134,6 +152,12 @@ pub fn add_together_callback(
     Ok(())
 }
 ```
+
+**v0.5.1 BLS Verification Notes:**
+- Replace `ComputationOutputs<T>` with `SignedComputationOutputs<T>`
+- Always call `verify_output()` to validate BLS signatures
+- Requires `cluster_account` and `computation_account` references
+- Possible errors: `BLSSignatureVerificationFailed`, `InvalidClusterBLSPublicKey`, `AbortedComputation`
 
 ### Step 7: Client Decrypts Result
 
@@ -161,8 +185,9 @@ Every encrypted instruction in your Solana program typically has three associate
 Called once after deployment to set up the computation definition:
 
 ```rust
+// v0.5.1: init_comp_def removed the first offset parameter
 pub fn init_add_together_comp_def(ctx: Context<InitAddTogetherCompDef>) -> Result<()> {
-    init_comp_def(ctx.accounts, 0, None, None)?;
+    init_comp_def(ctx.accounts, None, None)?;
     Ok(())
 }
 ```

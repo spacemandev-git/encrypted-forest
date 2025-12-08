@@ -1,6 +1,10 @@
-# Deployment Guide
+# Deployment Guide (v0.5.1)
 
 This document covers deploying your MXE (MPC eXecution Environment) to Solana devnet and mainnet.
+
+> **v0.5.1 Notes**: 
+> - Only the **Cerberus** backend is supported; Manticore is unavailable
+> - Environment variable changed: `ARCIUM_CLUSTER_PUBKEY` → `ARCIUM_CLUSTER_OFFSET`
 
 ## Prerequisites
 
@@ -29,10 +33,10 @@ For larger circuits, store them offchain and reference by URL:
 ```rust
 use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 
+// v0.5.1: init_comp_def removed the first offset parameter
 pub fn init_my_function_comp_def(ctx: Context<InitMyFunctionCompDef>) -> Result<()> {
     init_comp_def(
         ctx.accounts,
-        0,
         Some(CircuitSource::OffChain(OffChainCircuitSource {
             source: "https://your-storage.com/path/to/my_function.arcis".to_string(),
             hash: [0; 32],  // Hash verification not enforced yet
@@ -66,9 +70,9 @@ arcium deploy \
 |--------|---------|
 | `1078779259` | v0.3.0 |
 | `3726127828` | v0.3.0 |
-| `768109697` | v0.4.0 |
+| `768109697` | v0.4.0 / v0.5.1 |
 
-Choose the cluster offset matching your Arcium version.
+**v0.5.1 uses the same cluster as v0.4.0**. Choose the cluster offset matching your Arcium version.
 
 ### Recommended: Use a Reliable RPC
 
@@ -137,12 +141,15 @@ After deployment, initialize each computation definition. Only needed once per p
 **Update cluster configuration in your code:**
 
 ```typescript
-// Replace local testing code:
-// const arciumEnv = getArciumEnv();
-// clusterAccount: arciumEnv.arciumClusterPubkey,
+import { getClusterAccAddress, getArciumEnv } from "@arcium-hq/client";
 
-// With devnet cluster:
-const clusterOffset = 768109697;  // Use your deployed cluster
+// v0.5.1: Environment variable changed from ARCIUM_CLUSTER_PUBKEY to ARCIUM_CLUSTER_OFFSET
+// For local testing:
+const arciumEnv = getArciumEnv();
+const clusterAccount = getClusterAccAddress(arciumEnv.arciumClusterOffset);
+
+// For devnet:
+const clusterOffset = 768109697;  // v0.4.0/v0.5.1 cluster
 const clusterAccount = getClusterAccAddress(clusterOffset);
 ```
 
@@ -161,6 +168,8 @@ solana program show <your-program-id> --url <your-rpc-url>
 ### 3. Update Test Configuration for Devnet
 
 ```typescript
+import { getClusterAccAddress, getArciumEnv } from "@arcium-hq/client";
+
 const useDevnet = true;
 
 if (useDevnet) {
@@ -173,11 +182,13 @@ if (useDevnet) {
         commitment: "confirmed",
     });
     const program = new anchor.Program<YourProgram>(IDL, provider);
+    // v0.5.1: Use getClusterAccAddress with offset
     const clusterAccount = getClusterAccAddress(768109697);
 } else {
     anchor.setProvider(anchor.AnchorProvider.env());
     const arciumEnv = getArciumEnv();
-    const clusterAccount = arciumEnv.arciumClusterPubkey;
+    // v0.5.1: arciumClusterPubkey → arciumClusterOffset (derive cluster address)
+    const clusterAccount = getClusterAccAddress(arciumEnv.arciumClusterOffset);
 }
 ```
 

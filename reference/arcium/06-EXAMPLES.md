@@ -1,6 +1,12 @@
-# Complete Code Examples
+# Complete Code Examples (v0.5.1)
 
 This document provides complete, working examples from the Arcium ecosystem.
+
+> **v0.5.1 Notes**: All examples updated to use:
+> - `ArgBuilder` instead of `vec![Argument::...]`
+> - `SignedComputationOutputs<T>` with `verify_output()` for callbacks
+> - Updated PDA macros with `mxe_account` and error parameters
+> - New `queue_computation` signature with 7 parameters
 
 ## Example 1: Coinflip Game
 
@@ -48,8 +54,9 @@ declare_id!("YOUR_PROGRAM_ID");
 pub mod coinflip {
     use super::*;
 
+    // v0.5.1: Removed offset parameter from init_comp_def
     pub fn init_flip_comp_def(ctx: Context<InitFlipCompDef>) -> Result<()> {
-        init_comp_def(ctx.accounts, 0, None, None)?;
+        init_comp_def(ctx.accounts, None, None)?;
         Ok(())
     }
 
@@ -60,33 +67,47 @@ pub mod coinflip {
         pub_key: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
-        let args = vec![
-            Argument::ArcisPubkey(pub_key),
-            Argument::PlaintextU128(nonce),
-            Argument::EncryptedBool(user_choice),
-        ];
+        // v0.5.1: Use ArgBuilder
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pub_key)
+            .plaintext_u128(nonce)
+            .encrypted_bool(user_choice)
+            .build();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        // v0.5.1: Updated queue_computation with new callback_ix signature and cu_price_micro
         queue_computation(
             ctx.accounts,
             computation_offset,
             args,
             None,
-            vec![FlipCallback::callback_ix(&[])],
+            vec![FlipCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[]
+            )?],
             1,
+            0,  // cu_price_micro
         )?;
         Ok(())
     }
 
+    // v0.5.1: Use SignedComputationOutputs with BLS verification
     #[arcium_callback(encrypted_ix = "flip")]
     pub fn flip_callback(
         ctx: Context<FlipCallback>,
-        output: ComputationOutputs<FlipOutput>,
+        output: SignedComputationOutputs<FlipOutput>,
     ) -> Result<()> {
-        let result = match output {
-            ComputationOutputs::Success(FlipOutput { field_0 }) => field_0,
-            _ => return Err(ErrorCode::AbortedComputation.into()),
+        let result = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account
+        ) {
+            Ok(FlipOutput { field_0 }) => field_0,
+            Err(e) => {
+                msg!("Verification failed: {}", e);
+                return Err(ErrorCode::AbortedComputation.into())
+            },
         };
 
         emit!(FlipEvent { result });
@@ -107,7 +128,7 @@ pub enum ErrorCode {
     ClusterNotSet,
 }
 
-// Account structs would follow the standard pattern...
+// Account structs with v0.5.1 PDA macros...
 ```
 
 ---

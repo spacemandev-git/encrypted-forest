@@ -1,6 +1,8 @@
-# Arcis Framework Reference
+# Arcis Framework Reference (v0.5.1)
 
 Arcis is Arcium's Rust-based framework for writing secure multi-party computation (MPC) circuits. This document covers the complete syntax, types, and operations available.
+
+> **Note**: The Arcis syntax for encrypted instructions remains largely unchanged in v0.5.1. The breaking changes are primarily in the Solana program integration (see [04-SOLANA-PROGRAM.md](./04-SOLANA-PROGRAM.md)).
 
 ## Basic Structure
 

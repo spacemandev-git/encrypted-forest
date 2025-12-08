@@ -1,12 +1,19 @@
-# TypeScript Client Library
+# TypeScript Client Library (v0.5.1)
 
 This document covers the Arcium TypeScript SDK for client-side encryption, decryption, and interaction with MXE programs.
+
+> **v0.5.1 Breaking Changes:**
+> - Environment variable: `ARCIUM_CLUSTER_PUBKEY` → `ARCIUM_CLUSTER_OFFSET`
+> - `arciumEnv.arciumClusterPubkey` → `arciumEnv.arciumClusterOffset` (PublicKey → number)
+> - PDA functions now use `arciumClusterOffset` instead of `program.programId`
+> - Several functions renamed (see table below)
+> - Parameter name: `mxeProgramID` → `mxeProgramId` (camelCase)
 
 ## Installation
 
 ```bash
 # Client library (for building & invoking computations)
-npm install @arcium-hq/client
+npm install @arcium-hq/client@0.5.1
 
 # Reader library (for reading MXE data)
 npm install @arcium-hq/reader
@@ -15,6 +22,16 @@ npm install @arcium-hq/reader
 ## API Reference
 
 Complete TypeScript SDK documentation: https://ts.arcium.com/api
+
+## v0.5.1 Function Renames
+
+| Old Function (v0.4.x) | New Function (v0.5.1) |
+|-----------------------|-----------------------|
+| `getArciumProgAddress()` | `getArciumProgramId()` |
+| `getMempoolAccData()` | `getMempoolAccInfo()` |
+| `getExecutingPoolAccData()` | `getExecutingPoolAccInfo()` |
+| `getArciumProgramReadonly()` | `getArciumProgram()` |
+| `getArxAccPDA()` | `getArxNodeAccAddress()` |
 
 ## Core Concepts
 
@@ -157,32 +174,59 @@ const decrypted = cipher.decrypt(
 console.log("Decrypted result:", decrypted);
 ```
 
-## Helper Functions Reference
+## Helper Functions Reference (v0.5.1)
 
 ### Address Derivation
 
+> **v0.5.1 Change**: Most PDA functions now use `arciumClusterOffset` instead of `program.programId`.
+
 ```typescript
-// Get MXE account address
-const mxeAddr = getMXEAccAddress(programId);
+import {
+  getMXEAccAddress,
+  getMempoolAccAddress,
+  getExecutingPoolAccAddress,
+  getComputationAccAddress,
+  getCompDefAccAddress,
+  getCompDefAccOffset,
+  getClusterAccAddress,
+  getArciumEnv,
+} from "@arcium-hq/client";
 
-// Get mempool address
-const mempoolAddr = getMempoolAccAddress(programId);
+const arciumEnv = getArciumEnv();
 
-// Get executing pool address
-const execPoolAddr = getExecutingPoolAccAddress(programId);
+// Get MXE account address (still uses programId)
+const mxeAddr = getMXEAccAddress(program.programId);
 
-// Get computation account address (for specific computation)
-const compAddr = getComputationAccAddress(programId, computationOffset);
+// v0.5.1: These now use arciumClusterOffset instead of programId
+const mempoolAddr = getMempoolAccAddress(arciumEnv.arciumClusterOffset);
+const execPoolAddr = getExecutingPoolAccAddress(arciumEnv.arciumClusterOffset);
 
-// Get computation definition address
+// v0.5.1: Computation account uses clusterOffset
+const compAddr = getComputationAccAddress(
+    arciumEnv.arciumClusterOffset,  // Changed from program.programId
+    computationOffset
+);
+
+// Get computation definition address (still uses programId)
 const compDefAddr = getCompDefAccAddress(
-    programId, 
+    program.programId,
     Buffer.from(getCompDefAccOffset("function_name")).readUInt32LE()
 );
 
-// Get cluster address (for devnet deployment)
-const clusterAddr = getClusterAccAddress(clusterOffset);
+// v0.5.1: Cluster address is now derived (use getClusterAccAddress)
+const clusterAddr = getClusterAccAddress(arciumEnv.arciumClusterOffset);
 ```
+
+### v0.5.1 PDA Function Changes
+
+| Function | Old (v0.4.x) | New (v0.5.1) |
+|----------|--------------|--------------|
+| `getMXEAccAddress()` | `program.programId` | `program.programId` (unchanged) |
+| `getMempoolAccAddress()` | `program.programId` | `arciumEnv.arciumClusterOffset` |
+| `getExecutingPoolAccAddress()` | `program.programId` | `arciumEnv.arciumClusterOffset` |
+| `getComputationAccAddress()` | `program.programId, offset` | `arciumEnv.arciumClusterOffset, offset` |
+| `getCompDefAccAddress()` | `program.programId, offset` | `program.programId, offset` (unchanged) |
+| Cluster Account | `arciumEnv.arciumClusterPubkey` | `getClusterAccAddress(arciumEnv.arciumClusterOffset)` |
 
 ### Cluster Offsets for Devnet
 
@@ -191,12 +235,13 @@ const clusterAddr = getClusterAccAddress(clusterOffset);
 const CLUSTER_V030_A = 1078779259;
 const CLUSTER_V030_B = 3726127828;
 const CLUSTER_V040 = 768109697;
+const CLUSTER_V051 = 768109697;  // v0.5.1 uses same cluster as v0.4.0
 
 // Use the one matching your Arcium version
-const clusterAccount = getClusterAccAddress(CLUSTER_V040);
+const clusterAccount = getClusterAccAddress(CLUSTER_V051);
 ```
 
-## Complete Test Example
+## Complete Test Example (v0.5.1)
 
 ```typescript
 import * as anchor from "@coral-xyz/anchor";
@@ -214,6 +259,7 @@ import {
     getExecutingPoolAccAddress,
     getCompDefAccAddress,
     getCompDefAccOffset,
+    getClusterAccAddress,  // v0.5.1: New import
 } from "@arcium-hq/client";
 import { MyProgram } from "../target/types/my_program";
 
@@ -229,7 +275,7 @@ describe("My Program", () => {
         const publicKey = x25519.getPublicKey(privateKey);
         const mxePublicKey = await getMXEPublicKeyWithRetry(
             provider,
-            program.programId
+            program.programId  // v0.5.1: parameter is now mxeProgramId (camelCase)
         );
         const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
         const cipher = new RescueCipher(sharedSecret);
@@ -251,6 +297,7 @@ describe("My Program", () => {
         // Queue computation
         const computationOffset = new anchor.BN(randomBytes(8), "hex");
         
+        // v0.5.1: Updated account addresses
         await program.methods
             .addTogether(
                 computationOffset,
@@ -263,14 +310,19 @@ describe("My Program", () => {
                 )
             )
             .accountsPartial({
+                // v0.5.1: Use arciumClusterOffset instead of program.programId
                 computationAccount: getComputationAccAddress(
-                    program.programId,
+                    arciumEnv.arciumClusterOffset,  // Changed!
                     computationOffset
                 ),
-                clusterAccount: arciumEnv.arciumClusterPubkey,
+                // v0.5.1: Cluster is now derived from offset
+                clusterAccount: getClusterAccAddress(arciumEnv.arciumClusterOffset),
+                // MXE still uses programId
                 mxeAccount: getMXEAccAddress(program.programId),
-                mempoolAccount: getMempoolAccAddress(program.programId),
-                executingPool: getExecutingPoolAccAddress(program.programId),
+                // v0.5.1: Use arciumClusterOffset
+                mempoolAccount: getMempoolAccAddress(arciumEnv.arciumClusterOffset),
+                executingPool: getExecutingPoolAccAddress(arciumEnv.arciumClusterOffset),
+                // compDefAccount still uses programId
                 compDefAccount: getCompDefAccAddress(
                     program.programId,
                     Buffer.from(
@@ -278,7 +330,7 @@ describe("My Program", () => {
                     ).readUInt32LE()
                 ),
             })
-            .rpc({ commitment: "confirmed" });
+            .rpc({ skipPreflight: true, commitment: "confirmed" });
 
         // Wait for finalization
         await awaitComputationFinalization(

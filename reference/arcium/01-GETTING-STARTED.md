@@ -1,4 +1,4 @@
-# Getting Started with Arcium
+# Getting Started with Arcium (v0.5.1)
 
 ## Prerequisites
 
@@ -9,6 +9,30 @@ Before installing Arcium, ensure you have:
 - **Yarn**: Install from https://yarnpkg.com/getting-started/install
 - **Anchor 0.32.1**: Install from https://www.anchor-lang.com/docs/installation
 - **Docker & Docker Compose**: Required for local testing
+
+## Updating Dependencies to v0.5.1
+
+If you have an existing project, update your dependencies:
+
+### Rust Dependencies
+
+```bash
+# Update program dependencies
+cd programs/your-program-name
+cargo update --package arcium-client --precise 0.5.1
+cargo update --package arcium-macros --precise 0.5.1
+cargo update --package arcium-anchor --precise 0.5.1
+
+# Update encrypted-ixs dependencies
+cd ../../encrypted-ixs
+cargo update --package arcis-imports --precise 0.5.1
+```
+
+### TypeScript Dependencies
+
+```bash
+npm install @arcium-hq/client@0.5.1
+```
 
 ## ⚠️ Known Issues / Required Workarounds
 
@@ -142,8 +166,9 @@ pub mod hello_world {
     use super::*;
 
     // Initialize computation definition (called once after deployment)
+    // NOTE: v0.5.1 removed the first offset parameter from init_comp_def
     pub fn init_add_together_comp_def(ctx: Context<InitAddTogetherCompDef>) -> Result<()> {
-        init_comp_def(ctx.accounts, 0, None, None)?;
+        init_comp_def(ctx.accounts, None, None)?;
         Ok(())
     }
 
@@ -156,35 +181,52 @@ pub mod hello_world {
         pub_key: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
-        let args = vec![
-            Argument::ArcisPubkey(pub_key),
-            Argument::PlaintextU128(nonce),
-            Argument::EncryptedU8(ciphertext_0),
-            Argument::EncryptedU8(ciphertext_1),
-        ];
+        // v0.5.1: Use ArgBuilder instead of vec![Argument::...]
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pub_key)
+            .plaintext_u128(nonce)
+            .encrypted_u8(ciphertext_0)
+            .encrypted_u8(ciphertext_1)
+            .build();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        // v0.5.1: queue_computation has new signature
+        // - callback_ix now requires computation_offset and mxe_account
+        // - Added cu_price_micro parameter (7th param) for priority fees
         queue_computation(
             ctx.accounts,
             computation_offset,
             args,
             None,
-            vec![AddTogetherCallback::callback_ix(&[])],
+            vec![AddTogetherCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[]
+            )?],
             1,
+            0,  // cu_price_micro: priority fee in microlamports (0 = no priority fee)
         )?;
         Ok(())
     }
 
     // Handle the result callback from MPC cluster
+    // v0.5.1: Uses SignedComputationOutputs with BLS verification
     #[arcium_callback(encrypted_ix = "add_together")]
     pub fn add_together_callback(
         ctx: Context<AddTogetherCallback>,
-        output: ComputationOutputs<AddTogetherOutput>,
+        output: SignedComputationOutputs<AddTogetherOutput>,
     ) -> Result<()> {
-        let o = match output {
-            ComputationOutputs::Success(AddTogetherOutput { field_0 }) => field_0,
-            _ => return Err(ErrorCode::AbortedComputation.into()),
+        // v0.5.1: Must call verify_output() to validate BLS signatures
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account
+        ) {
+            Ok(AddTogetherOutput { field_0 }) => field_0,
+            Err(e) => {
+                msg!("Computation verification failed: {}", e);
+                return Err(ErrorCode::AbortedComputation.into())
+            },
         };
 
         emit!(SumEvent {
