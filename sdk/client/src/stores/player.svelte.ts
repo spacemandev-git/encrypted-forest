@@ -7,8 +7,9 @@
 
 import type { EncryptedForestClient } from "@encrypted-forest/core";
 import type { Player, Subscription } from "@encrypted-forest/core";
+import { pubkeyFromParts } from "@encrypted-forest/core";
 import type { PublicKey } from "@solana/web3.js";
-import type { PlanetsStore } from "./planets.svelte.js";
+import type { PlanetsStore, PlanetEntry } from "./planets.svelte.js";
 
 export class PlayerStore {
   #client: EncryptedForestClient;
@@ -26,23 +27,22 @@ export class PlayerStore {
   /** Player points */
   points = $derived(this.player?.points ?? 0n);
 
-  /** Number of planets owned by this player */
-  ownedPlanets = $derived.by(() => {
-    if (!this.playerPubkey) return 0;
-    const ownerStr = this.playerPubkey.toBase58();
-    return [...this.#planetsStore.planets.values()].filter(
-      (p) => p.onChain?.owner?.toBase58() === ownerStr
-    ).length;
+  /** List of owned planet entries (decrypted state matches player pubkey) */
+  ownedPlanetsList = $derived.by((): PlanetEntry[] => {
+    if (!this.playerPubkey) return [];
+    const ownerBytes = this.playerPubkey.toBytes();
+    return this.#planetsStore.ownedBy(ownerBytes);
   });
+
+  /** Number of planets owned by this player */
+  ownedPlanets = $derived(this.ownedPlanetsList.length);
 
   /** Total ships across all owned planets */
   totalShips = $derived.by(() => {
-    if (!this.playerPubkey) return 0n;
-    const ownerStr = this.playerPubkey.toBase58();
     let total = 0n;
-    for (const entry of this.#planetsStore.planets.values()) {
-      if (entry.onChain?.owner?.toBase58() === ownerStr) {
-        total += entry.onChain.shipCount;
+    for (const entry of this.ownedPlanetsList) {
+      if (entry.decrypted) {
+        total += BigInt(entry.decrypted.shipCount);
       }
     }
     return total;
@@ -50,24 +50,13 @@ export class PlayerStore {
 
   /** Total metal across all owned planets */
   totalMetal = $derived.by(() => {
-    if (!this.playerPubkey) return 0n;
-    const ownerStr = this.playerPubkey.toBase58();
     let total = 0n;
-    for (const entry of this.#planetsStore.planets.values()) {
-      if (entry.onChain?.owner?.toBase58() === ownerStr) {
-        total += entry.onChain.metalCount;
+    for (const entry of this.ownedPlanetsList) {
+      if (entry.decrypted) {
+        total += BigInt(entry.decrypted.metalCount);
       }
     }
     return total;
-  });
-
-  /** List of owned planet entries */
-  ownedPlanetsList = $derived.by(() => {
-    if (!this.playerPubkey) return [];
-    const ownerStr = this.playerPubkey.toBase58();
-    return [...this.#planetsStore.planets.values()].filter(
-      (p) => p.onChain?.owner?.toBase58() === ownerStr
-    );
   });
 
   constructor(client: EncryptedForestClient, planetsStore: PlanetsStore) {

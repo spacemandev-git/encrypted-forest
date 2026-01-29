@@ -30,6 +30,10 @@ export interface PersistedPlanet {
   size: number;
   comets: number[];
   lastFetched: number; // Date.now() timestamp
+  /** Encrypted account data cached from chain (optional, for faster reload) */
+  encPubkey?: number[];       // MXE public key bytes used for encryption
+  encNonce?: number[];        // encryption nonce bytes
+  encCiphertexts?: number[];  // encrypted ciphertext bytes
 }
 
 /**

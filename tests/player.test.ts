@@ -57,7 +57,6 @@ describe("Player Initialization", () => {
     const gameId = nextGameId();
     const serverKp = Keypair.generate();
 
-    // Fund the server keypair so it can sign
     await airdrop(provider, serverKp.publicKey, 1);
 
     const config = defaultGameConfig(gameId, {

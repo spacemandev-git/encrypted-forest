@@ -2,7 +2,8 @@
  * RPC websocket subscriptions for program logs and events.
  *
  * Uses @solana/web3.js connection.onLogs() to subscribe to
- * program log events (MoveEvent, UpgradeEvent, BroadcastEvent, etc.)
+ * program log events (InitPlanetEvent, InitSpawnPlanetEvent,
+ * ProcessMoveEvent, FlushPlanetEvent, UpgradePlanetEvent, BroadcastEvent).
  */
 
 import { Connection, PublicKey, type Commitment } from "@solana/web3.js";
@@ -11,8 +12,8 @@ import type { Subscription } from "./accounts.js";
 /**
  * Subscribe to all logs from the Encrypted Forest program.
  *
- * Logs include emitted events (MoveEvent, UpgradeEvent, BroadcastEvent,
- * SpawnResultEvent, PlanetKeyEvent, CombatResultEvent).
+ * Logs include emitted events (InitPlanetEvent, InitSpawnPlanetEvent,
+ * ProcessMoveEvent, FlushPlanetEvent, UpgradePlanetEvent, BroadcastEvent).
  */
 export function subscribeToGameLogs(
   connection: Connection,
@@ -55,7 +56,8 @@ export function subscribeToBroadcasts(
     (logInfo) => {
       // Anchor events are base64-encoded in logs prefixed with "Program data:"
       const hasBroadcast = logInfo.logs.some(
-        (log) => log.includes("Program data:") || log.includes("BroadcastEvent")
+        (log) =>
+          log.includes("Program data:") || log.includes("BroadcastEvent")
       );
       if (hasBroadcast) {
         callback(logInfo);
@@ -67,9 +69,9 @@ export function subscribeToBroadcasts(
 }
 
 /**
- * Subscribe specifically to move events.
+ * Subscribe specifically to init planet events.
  */
-export function subscribeToMoveEvents(
+export function subscribeToInitPlanetEvents(
   connection: Connection,
   callback: (logs: { signature: string; logs: string[] }) => void,
   programId?: PublicKey,
@@ -78,10 +80,86 @@ export function subscribeToMoveEvents(
   return subscribeToGameLogs(
     connection,
     (logInfo) => {
-      const hasMove = logInfo.logs.some(
-        (log) => log.includes("Program data:") || log.includes("MoveEvent")
+      const hasEvent = logInfo.logs.some(
+        (log) =>
+          log.includes("Program data:") || log.includes("InitPlanetEvent")
       );
-      if (hasMove) {
+      if (hasEvent) {
+        callback(logInfo);
+      }
+    },
+    programId,
+    commitment
+  );
+}
+
+/**
+ * Subscribe specifically to process move events.
+ */
+export function subscribeToProcessMoveEvents(
+  connection: Connection,
+  callback: (logs: { signature: string; logs: string[] }) => void,
+  programId?: PublicKey,
+  commitment: Commitment = "confirmed"
+): Subscription {
+  return subscribeToGameLogs(
+    connection,
+    (logInfo) => {
+      const hasEvent = logInfo.logs.some(
+        (log) =>
+          log.includes("Program data:") || log.includes("ProcessMoveEvent")
+      );
+      if (hasEvent) {
+        callback(logInfo);
+      }
+    },
+    programId,
+    commitment
+  );
+}
+
+/**
+ * Subscribe specifically to flush planet events.
+ */
+export function subscribeToFlushPlanetEvents(
+  connection: Connection,
+  callback: (logs: { signature: string; logs: string[] }) => void,
+  programId?: PublicKey,
+  commitment: Commitment = "confirmed"
+): Subscription {
+  return subscribeToGameLogs(
+    connection,
+    (logInfo) => {
+      const hasEvent = logInfo.logs.some(
+        (log) =>
+          log.includes("Program data:") || log.includes("FlushPlanetEvent")
+      );
+      if (hasEvent) {
+        callback(logInfo);
+      }
+    },
+    programId,
+    commitment
+  );
+}
+
+/**
+ * Subscribe specifically to upgrade planet events.
+ */
+export function subscribeToUpgradePlanetEvents(
+  connection: Connection,
+  callback: (logs: { signature: string; logs: string[] }) => void,
+  programId?: PublicKey,
+  commitment: Commitment = "confirmed"
+): Subscription {
+  return subscribeToGameLogs(
+    connection,
+    (logInfo) => {
+      const hasEvent = logInfo.logs.some(
+        (log) =>
+          log.includes("Program data:") || log.includes("UpgradePlanetEvent")
+      );
+      if (hasEvent) {
         callback(logInfo);
       }
     },

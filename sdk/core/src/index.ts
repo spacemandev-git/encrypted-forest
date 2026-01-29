@@ -23,6 +23,8 @@ export type {
   CelestialBody,
   CelestialBodyProperties,
   CelestialBodyStats,
+  EncryptedCelestialBodyAccount,
+  EncryptedPendingMoveAccount,
 } from "./types/celestialBody.js";
 export {
   CelestialBodyType,
@@ -32,15 +34,18 @@ export {
 
 export type { Player } from "./types/player.js";
 
-export type { PendingMoves, PendingMove } from "./types/pendingMoves.js";
+export type {
+  EncryptedPendingMoves,
+  EncryptedPendingMove,
+} from "./types/pendingMoves.js";
 export { MAX_PENDING_MOVES } from "./types/pendingMoves.js";
 
 export type {
-  SpawnResultEvent,
-  PlanetKeyEvent,
-  CombatResultEvent,
-  MoveEvent,
-  UpgradeEvent,
+  InitPlanetEvent,
+  InitSpawnPlanetEvent,
+  ProcessMoveEvent,
+  FlushPlanetEvent,
+  UpgradePlanetEvent,
   BroadcastEvent,
 } from "./types/events.js";
 
@@ -90,6 +95,18 @@ export {
 } from "./crypto/fog.js";
 export type { DiscoveredPlanet } from "./crypto/fog.js";
 
+export {
+  derivePlanetPublicKey,
+  computeSharedSecret,
+  encryptFieldElement,
+  decryptFieldElement,
+  decryptPlanetState,
+  decryptPendingMoveData,
+  pubkeyFromParts,
+  pubkeyToParts,
+} from "./crypto/planetCipher.js";
+export type { PlanetState, PendingMoveData } from "./crypto/planetCipher.js";
+
 // ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------
@@ -97,12 +114,12 @@ export type { DiscoveredPlanet } from "./crypto/fog.js";
 export { fetchGame, fetchGameByAddress } from "./accounts/game.js";
 export { fetchPlayer, fetchPlayerByAddress } from "./accounts/player.js";
 export {
-  fetchCelestialBody,
-  fetchCelestialBodyByAddress,
+  fetchEncryptedCelestialBody,
+  fetchEncryptedCelestialBodyByAddress,
 } from "./accounts/celestialBody.js";
 export {
-  fetchPendingMoves,
-  fetchPendingMovesByAddress,
+  fetchEncryptedPendingMoves,
+  fetchEncryptedPendingMovesByAddress,
 } from "./accounts/pendingMoves.js";
 
 // ---------------------------------------------------------------------------
@@ -114,18 +131,22 @@ export type { CreateGameArgs } from "./instructions/createGame.js";
 
 export { buildInitPlayerIx } from "./instructions/initPlayer.js";
 
-export {
-  buildSpawnIx,
-  buildCreatePlanetIx,
-  buildClaimSpawnPlanetIx,
-} from "./instructions/spawn.js";
-export type { SpawnArgs } from "./instructions/spawn.js";
+export type { ArciumAccounts } from "./instructions/arciumAccounts.js";
 
-export { buildMoveShipsIx } from "./instructions/moveShips.js";
-export type { MoveShipsArgs } from "./instructions/moveShips.js";
+export { buildQueueInitPlanetIx } from "./instructions/queueInitPlanet.js";
+export type { QueueInitPlanetArgs } from "./instructions/queueInitPlanet.js";
 
-export { buildUpgradeIx } from "./instructions/upgrade.js";
-export type { UpgradeArgs } from "./instructions/upgrade.js";
+export { buildQueueInitSpawnPlanetIx } from "./instructions/queueInitSpawnPlanet.js";
+export type { QueueInitSpawnPlanetArgs } from "./instructions/queueInitSpawnPlanet.js";
+
+export { buildQueueProcessMoveIx } from "./instructions/queueProcessMove.js";
+export type { QueueProcessMoveArgs } from "./instructions/queueProcessMove.js";
+
+export { buildQueueFlushPlanetIx } from "./instructions/queueFlushPlanet.js";
+export type { QueueFlushPlanetArgs } from "./instructions/queueFlushPlanet.js";
+
+export { buildQueueUpgradePlanetIx } from "./instructions/queueUpgradePlanet.js";
+export type { QueueUpgradePlanetArgs } from "./instructions/queueUpgradePlanet.js";
 
 export { buildBroadcastIx } from "./instructions/broadcast.js";
 export type { BroadcastArgs } from "./instructions/broadcast.js";
@@ -152,7 +173,10 @@ export type { Subscription } from "./subscriptions/accounts.js";
 export {
   subscribeToGameLogs,
   subscribeToBroadcasts,
-  subscribeToMoveEvents,
+  subscribeToInitPlanetEvents,
+  subscribeToProcessMoveEvents,
+  subscribeToFlushPlanetEvents,
+  subscribeToUpgradePlanetEvents,
 } from "./subscriptions/logs.js";
 
 // ---------------------------------------------------------------------------

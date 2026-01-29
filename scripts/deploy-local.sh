@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# deploy-local.sh - Build and deploy Encrypted Forest to local Surfpool
+# deploy-local.sh - Build, upload circuits to R2, and deploy Encrypted Forest to local Surfpool
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RPC_URL="${RPC_URL:-http://localhost:8899}"
+CIRCUIT_BUCKET="${CIRCUIT_BUCKET:?CIRCUIT_BUCKET env var is required}"
 
 # ---------------------------------------------------------------------------
 # Wait for RPC health
@@ -35,6 +36,12 @@ cd "${PROJECT_ROOT}"
 arcium build
 
 # ---------------------------------------------------------------------------
+# Upload circuits to R2
+# ---------------------------------------------------------------------------
+echo "Uploading .arcis circuit files to R2 bucket '${CIRCUIT_BUCKET}' ..."
+"${PROJECT_ROOT}/scripts/upload-circuits.sh"
+
+# ---------------------------------------------------------------------------
 # Deploy
 # ---------------------------------------------------------------------------
 echo "Deploying program to ${RPC_URL} ..."
@@ -42,11 +49,11 @@ anchor deploy --provider.cluster "${RPC_URL}"
 echo "Program deployed successfully."
 
 # ---------------------------------------------------------------------------
-# Initialize computation definitions
+# Initialize computation definitions (offchain circuits from R2)
 # ---------------------------------------------------------------------------
 INIT_SCRIPT="${PROJECT_ROOT}/scripts/init-comp-defs.ts"
 if [ -f "$INIT_SCRIPT" ]; then
-  echo "Initializing computation definitions ..."
+  echo "Initializing computation definitions (offchain from R2) ..."
   cd "${PROJECT_ROOT}"
   bun run "${INIT_SCRIPT}"
   echo "Computation definitions initialized."
@@ -58,5 +65,6 @@ fi
 
 echo ""
 echo "=== Deployment Complete ==="
-echo "  RPC: ${RPC_URL}"
+echo "  RPC:      ${RPC_URL}"
+echo "  Circuits: R2 bucket '${CIRCUIT_BUCKET}'"
 echo "  Program deployed and ready."

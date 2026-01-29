@@ -1,72 +1,71 @@
 import { PublicKey } from "@solana/web3.js";
-import { UpgradeFocus } from "./celestialBody.js";
 
 // ---------------------------------------------------------------------------
 // Events matching on-chain #[event] structs
 // ---------------------------------------------------------------------------
 
 /**
- * Emitted by verify_spawn_coordinates_callback.
- * Contains encrypted spawn validation result.
+ * Emitted by init_planet_callback.
+ * Contains encrypted planet hash and validity info.
  */
-export interface SpawnResultEvent {
+export interface InitPlanetEvent {
+  encryptedHash0: Uint8Array; // [u8; 32]
+  encryptedHash1: Uint8Array; // [u8; 32]
+  encryptedHash2: Uint8Array; // [u8; 32]
+  encryptedHash3: Uint8Array; // [u8; 32]
   encryptedValid: Uint8Array; // [u8; 32]
+  encryptionKey: Uint8Array; // [u8; 32]
+  nonce: Uint8Array; // [u8; 16]
+}
+
+/**
+ * Emitted by init_spawn_planet_callback.
+ * Contains encrypted planet hash, validity, and spawn validity.
+ */
+export interface InitSpawnPlanetEvent {
   encryptedHash0: Uint8Array; // [u8; 32]
   encryptedHash1: Uint8Array; // [u8; 32]
   encryptedHash2: Uint8Array; // [u8; 32]
   encryptedHash3: Uint8Array; // [u8; 32]
+  encryptedValid: Uint8Array; // [u8; 32]
+  encryptedSpawnValid: Uint8Array; // [u8; 32]
   encryptionKey: Uint8Array; // [u8; 32]
   nonce: Uint8Array; // [u8; 16]
 }
 
 /**
- * Emitted by create_planet_key_callback.
- * Contains encrypted planet hash components.
+ * Emitted by process_move_callback.
+ * Contains encrypted landing slot, surviving ships, and validity.
  */
-export interface PlanetKeyEvent {
-  encryptedHash0: Uint8Array; // [u8; 32]
-  encryptedHash1: Uint8Array; // [u8; 32]
-  encryptedHash2: Uint8Array; // [u8; 32]
-  encryptedHash3: Uint8Array; // [u8; 32]
+export interface ProcessMoveEvent {
+  encryptedLandingSlot: Uint8Array; // [u8; 32]
+  encryptedSurvivingShips: Uint8Array; // [u8; 32]
+  encryptedValid: Uint8Array; // [u8; 32]
   encryptionKey: Uint8Array; // [u8; 32]
   nonce: Uint8Array; // [u8; 16]
 }
 
 /**
- * Emitted by resolve_combat_callback.
- * Contains encrypted combat outcome.
+ * Emitted by flush_planet_callback.
+ * Contains planet hash and encrypted success flag.
  */
-export interface CombatResultEvent {
-  encryptedAttackerRemaining: Uint8Array; // [u8; 32]
-  encryptedDefenderRemaining: Uint8Array; // [u8; 32]
-  encryptedAttackerWins: Uint8Array; // [u8; 32]
-  encryptionKey: Uint8Array; // [u8; 32]
-  nonce: Uint8Array; // [u8; 16]
-}
-
-/**
- * Emitted by move_ships.
- * Plaintext event showing ship movement.
- */
-export interface MoveEvent {
-  sourceHash: Uint8Array; // [u8; 32]
-  targetHash: Uint8Array; // [u8; 32]
-  shipsSent: bigint;
-  shipsArriving: bigint;
-  metalSent: bigint;
-  landingSlot: bigint;
-  player: PublicKey;
-}
-
-/**
- * Emitted by upgrade.
- * Plaintext event showing planet upgrade.
- */
-export interface UpgradeEvent {
+export interface FlushPlanetEvent {
   planetHash: Uint8Array; // [u8; 32]
-  newLevel: number;
-  focus: UpgradeFocus;
-  player: PublicKey;
+  encryptedSuccess: Uint8Array; // [u8; 32]
+  encryptionKey: Uint8Array; // [u8; 32]
+  nonce: Uint8Array; // [u8; 16]
+}
+
+/**
+ * Emitted by upgrade_planet_callback.
+ * Contains planet hash, encrypted success flag, and new level.
+ */
+export interface UpgradePlanetEvent {
+  planetHash: Uint8Array; // [u8; 32]
+  encryptedSuccess: Uint8Array; // [u8; 32]
+  encryptedNewLevel: Uint8Array; // [u8; 32]
+  encryptionKey: Uint8Array; // [u8; 32]
+  nonce: Uint8Array; // [u8; 16]
 }
 
 /**

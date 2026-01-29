@@ -7,7 +7,7 @@
  */
 
 import * as THREE from "three";
-import { CelestialBodyType } from "@encrypted-forest/core";
+import { CelestialBodyType, pubkeyFromParts } from "@encrypted-forest/core";
 import type { PlanetEntry } from "@encrypted-forest/client";
 
 // ---------------------------------------------------------------------------
@@ -188,10 +188,19 @@ export class PlanetRenderer {
 
     const material = planetMesh.mesh.material as THREE.MeshStandardMaterial;
 
-    // Update ownership highlight
-    if (entry.onChain?.owner && playerPubkey) {
-      const ownerStr = entry.onChain.owner.toBase58();
-      if (ownerStr === playerPubkey) {
+    // Update ownership highlight using decrypted state
+    if (entry.decrypted && entry.decrypted.ownerExists !== 0 && playerPubkey) {
+      const ownerKey = pubkeyFromParts(
+        entry.decrypted.owner0,
+        entry.decrypted.owner1,
+        entry.decrypted.owner2,
+        entry.decrypted.owner3
+      );
+      // Compare owner bytes as hex string to the playerPubkey string
+      const ownerHex = Array.from(ownerKey)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      if (ownerHex === playerPubkey || playerPubkey === ownerKey.toString()) {
         material.emissiveIntensity = 0.6;
       } else {
         material.emissiveIntensity = 0.3;

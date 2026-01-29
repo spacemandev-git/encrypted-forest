@@ -8,6 +8,7 @@
  * 4. Verify game account data matches config
  * 5. Reject invalid configurations (zero map diameter, zero game speed, bad time range)
  * 6. Create multiple independent games
+ * 7. Both win condition types
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -18,7 +19,6 @@ import type { EncryptedForest } from "../target/types/encrypted_forest";
 import {
   getProviderAndProgram,
   readKpJson,
-  airdrop,
   createGame,
   defaultGameConfig,
   deriveGamePDA,
@@ -37,11 +37,7 @@ describe("Game Creation", () => {
     const setup = getProviderAndProgram();
     provider = setup.provider;
     program = setup.program;
-
-    // Use the local wallet as admin
-    admin = readKpJson(
-      `${process.env.HOME}/.config/solana/id.json`
-    );
+    admin = readKpJson(`${process.env.HOME}/.config/solana/id.json`);
   });
 
   it("creates a game with default config", async () => {
@@ -49,7 +45,6 @@ describe("Game Creation", () => {
     const config = defaultGameConfig(gameId);
     const gamePDA = await createGame(program, admin, config);
 
-    // Fetch account and verify
     const gameAccount = await program.account.game.fetch(gamePDA);
     expect(gameAccount.admin.toString()).toBe(admin.publicKey.toString());
     expect(gameAccount.gameId.toString()).toBe(gameId.toString());
@@ -66,7 +61,7 @@ describe("Game Creation", () => {
   it("creates a game with custom noise thresholds", async () => {
     const gameId = nextGameId();
     const customThresholds = {
-      deadSpaceThreshold: 64, // 75% has bodies
+      deadSpaceThreshold: 64,
       planetThreshold: 200,
       quasarThreshold: 230,
       spacetimeRipThreshold: 245,

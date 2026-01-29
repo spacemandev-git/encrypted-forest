@@ -4,23 +4,24 @@
  * High-level client tying together all SDK modules:
  * - Game management (create game, init player)
  * - Exploration (client-side hash-based noise scanning)
- * - Actions (spawn, move ships, upgrade, broadcast)
- * - Data fetching (game, player, celestial body, pending moves)
+ * - Actions (queue init planet, queue init spawn planet, queue process move,
+ *   queue flush planet, queue upgrade planet, broadcast)
+ * - Data fetching (game, player, encrypted celestial body, encrypted pending moves)
+ * - Decryption (planet state, pending move data)
  * - Subscriptions (account changes, log events)
  */
 
-import { type Program, BN, AnchorProvider } from "@coral-xyz/anchor";
+import { type Program, AnchorProvider } from "@coral-xyz/anchor";
 import {
   Connection,
   PublicKey,
-  Keypair,
   type Commitment,
 } from "@solana/web3.js";
-import type { Game, NoiseThresholds, WinCondition } from "./types/game.js";
+import type { Game, NoiseThresholds } from "./types/game.js";
 import type { Player } from "./types/player.js";
-import type { CelestialBody } from "./types/celestialBody.js";
-import type { PendingMoves } from "./types/pendingMoves.js";
-import { CelestialBodyType, UpgradeFocus } from "./types/celestialBody.js";
+import type { EncryptedCelestialBodyAccount } from "./types/celestialBody.js";
+import { CelestialBodyType } from "./types/celestialBody.js";
+import type { EncryptedPendingMoves } from "./types/pendingMoves.js";
 import {
   PROGRAM_ID,
   deriveGamePDA,
@@ -52,32 +53,31 @@ import {
   type DiscoveredPlanet,
 } from "./crypto/fog.js";
 import { derivePlanetKeySeed, verifyPlanetHash } from "./crypto/planetKey.js";
+import {
+  decryptPlanetState,
+  decryptPendingMoveData,
+  derivePlanetPublicKey,
+  computeSharedSecret,
+  pubkeyFromParts,
+  pubkeyToParts,
+  type PlanetState,
+  type PendingMoveData,
+} from "./crypto/planetCipher.js";
 import { fetchGame, fetchGameByAddress } from "./accounts/game.js";
 import { fetchPlayer, fetchPlayerByAddress } from "./accounts/player.js";
 import {
-  fetchCelestialBody,
-  fetchCelestialBodyByAddress,
+  fetchEncryptedCelestialBody,
+  fetchEncryptedCelestialBodyByAddress,
 } from "./accounts/celestialBody.js";
 import {
-  fetchPendingMoves,
-  fetchPendingMovesByAddress,
+  fetchEncryptedPendingMoves,
+  fetchEncryptedPendingMovesByAddress,
 } from "./accounts/pendingMoves.js";
 import {
   buildCreateGameIx,
   type CreateGameArgs,
 } from "./instructions/createGame.js";
 import { buildInitPlayerIx } from "./instructions/initPlayer.js";
-import {
-  buildSpawnIx,
-  buildCreatePlanetIx,
-  buildClaimSpawnPlanetIx,
-  type SpawnArgs,
-} from "./instructions/spawn.js";
-import {
-  buildMoveShipsIx,
-  type MoveShipsArgs,
-} from "./instructions/moveShips.js";
-import { buildUpgradeIx, type UpgradeArgs } from "./instructions/upgrade.js";
 import {
   buildBroadcastIx,
   type BroadcastArgs,
@@ -87,6 +87,27 @@ import {
   buildCleanupPlayerIx,
   buildCleanupPlanetIx,
 } from "./instructions/cleanup.js";
+import type { ArciumAccounts } from "./instructions/arciumAccounts.js";
+import {
+  buildQueueInitPlanetIx,
+  type QueueInitPlanetArgs,
+} from "./instructions/queueInitPlanet.js";
+import {
+  buildQueueInitSpawnPlanetIx,
+  type QueueInitSpawnPlanetArgs,
+} from "./instructions/queueInitSpawnPlanet.js";
+import {
+  buildQueueProcessMoveIx,
+  type QueueProcessMoveArgs,
+} from "./instructions/queueProcessMove.js";
+import {
+  buildQueueFlushPlanetIx,
+  type QueueFlushPlanetArgs,
+} from "./instructions/queueFlushPlanet.js";
+import {
+  buildQueueUpgradePlanetIx,
+  type QueueUpgradePlanetArgs,
+} from "./instructions/queueUpgradePlanet.js";
 import {
   subscribeToGame,
   subscribeToPlayer,
@@ -98,7 +119,10 @@ import {
 import {
   subscribeToGameLogs,
   subscribeToBroadcasts,
-  subscribeToMoveEvents,
+  subscribeToInitPlanetEvents,
+  subscribeToProcessMoveEvents,
+  subscribeToFlushPlanetEvents,
+  subscribeToUpgradePlanetEvents,
 } from "./subscriptions/logs.js";
 
 // ---------------------------------------------------------------------------
@@ -166,11 +190,11 @@ export class EncryptedForestClient {
     return fetchPlayerByAddress(this.program, address);
   }
 
-  async getCelestialBody(
+  async getEncryptedCelestialBody(
     gameId: bigint,
     planetHash: Uint8Array
-  ): Promise<CelestialBody> {
-    return fetchCelestialBody(
+  ): Promise<EncryptedCelestialBodyAccount> {
+    return fetchEncryptedCelestialBody(
       this.program,
       gameId,
       planetHash,
@@ -178,15 +202,17 @@ export class EncryptedForestClient {
     );
   }
 
-  async getCelestialBodyByAddress(address: PublicKey): Promise<CelestialBody> {
-    return fetchCelestialBodyByAddress(this.program, address);
+  async getEncryptedCelestialBodyByAddress(
+    address: PublicKey
+  ): Promise<EncryptedCelestialBodyAccount> {
+    return fetchEncryptedCelestialBodyByAddress(this.program, address);
   }
 
-  async getPendingMoves(
+  async getEncryptedPendingMoves(
     gameId: bigint,
     planetHash: Uint8Array
-  ): Promise<PendingMoves> {
-    return fetchPendingMoves(
+  ): Promise<EncryptedPendingMoves> {
+    return fetchEncryptedPendingMoves(
       this.program,
       gameId,
       planetHash,
@@ -194,8 +220,45 @@ export class EncryptedForestClient {
     );
   }
 
-  async getPendingMovesByAddress(address: PublicKey): Promise<PendingMoves> {
-    return fetchPendingMovesByAddress(this.program, address);
+  async getEncryptedPendingMovesByAddress(
+    address: PublicKey
+  ): Promise<EncryptedPendingMoves> {
+    return fetchEncryptedPendingMovesByAddress(this.program, address);
+  }
+
+  // -------------------------------------------------------------------------
+  // Decryption
+  // -------------------------------------------------------------------------
+
+  /**
+   * Decrypt an encrypted celestial body account into plaintext PlanetState.
+   * Requires knowing the planet_hash (which comes from knowing x, y, gameId).
+   */
+  decryptPlanetState(
+    planetHash: Uint8Array,
+    encAccount: EncryptedCelestialBodyAccount
+  ): PlanetState {
+    return decryptPlanetState(
+      planetHash,
+      encAccount.encPubkey,
+      encAccount.encNonce,
+      encAccount.encCiphertexts
+    );
+  }
+
+  /**
+   * Decrypt a single encrypted pending move into plaintext PendingMoveData.
+   */
+  decryptPendingMoveData(
+    planetHash: Uint8Array,
+    encMove: { encPubkey: Uint8Array; encNonce: Uint8Array; encCiphertexts: Uint8Array[] }
+  ): PendingMoveData {
+    return decryptPendingMoveData(
+      planetHash,
+      encMove.encPubkey,
+      encMove.encNonce,
+      encMove.encCiphertexts
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -210,45 +273,69 @@ export class EncryptedForestClient {
     return buildInitPlayerIx(this.program, owner, gameId, server);
   }
 
-  buildSpawn(
+  buildQueueInitPlanet(
     payer: PublicKey,
-    args: SpawnArgs,
-    arciumAccounts: Parameters<typeof buildSpawnIx>[3]
+    args: QueueInitPlanetArgs,
+    arciumAccounts: ArciumAccounts
   ) {
-    return buildSpawnIx(this.program, payer, args, arciumAccounts);
-  }
-
-  buildCreatePlanet(
-    payer: PublicKey,
-    gameId: bigint,
-    x: bigint,
-    y: bigint,
-    planetHash: Uint8Array
-  ) {
-    return buildCreatePlanetIx(
+    return buildQueueInitPlanetIx(
       this.program,
       payer,
-      gameId,
-      x,
-      y,
-      planetHash
+      args,
+      arciumAccounts
     );
   }
 
-  buildClaimSpawnPlanet(
-    owner: PublicKey,
-    gameId: bigint,
-    planetHash: Uint8Array
+  buildQueueInitSpawnPlanet(
+    payer: PublicKey,
+    args: QueueInitSpawnPlanetArgs,
+    arciumAccounts: ArciumAccounts
   ) {
-    return buildClaimSpawnPlanetIx(this.program, owner, gameId, planetHash);
+    return buildQueueInitSpawnPlanetIx(
+      this.program,
+      payer,
+      args,
+      arciumAccounts
+    );
   }
 
-  buildMoveShips(playerOwner: PublicKey, args: MoveShipsArgs) {
-    return buildMoveShipsIx(this.program, playerOwner, args);
+  buildQueueProcessMove(
+    payer: PublicKey,
+    args: QueueProcessMoveArgs,
+    arciumAccounts: ArciumAccounts
+  ) {
+    return buildQueueProcessMoveIx(
+      this.program,
+      payer,
+      args,
+      arciumAccounts
+    );
   }
 
-  buildUpgrade(playerOwner: PublicKey, args: UpgradeArgs) {
-    return buildUpgradeIx(this.program, playerOwner, args);
+  buildQueueFlushPlanet(
+    payer: PublicKey,
+    args: QueueFlushPlanetArgs,
+    arciumAccounts: ArciumAccounts
+  ) {
+    return buildQueueFlushPlanetIx(
+      this.program,
+      payer,
+      args,
+      arciumAccounts
+    );
+  }
+
+  buildQueueUpgradePlanet(
+    payer: PublicKey,
+    args: QueueUpgradePlanetArgs,
+    arciumAccounts: ArciumAccounts
+  ) {
+    return buildQueueUpgradePlanetIx(
+      this.program,
+      payer,
+      args,
+      arciumAccounts
+    );
   }
 
   buildBroadcast(broadcaster: PublicKey, args: BroadcastArgs) {
@@ -477,6 +564,32 @@ export class EncryptedForestClient {
     return verifyPlanetHash(x, y, gameId, expectedHash);
   }
 
+  derivePlanetPublicKey(planetHash: Uint8Array): Uint8Array {
+    return derivePlanetPublicKey(planetHash);
+  }
+
+  computeSharedSecret(
+    planetHash: Uint8Array,
+    mxePublicKey: Uint8Array
+  ): Uint8Array {
+    return computeSharedSecret(planetHash, mxePublicKey);
+  }
+
+  pubkeyFromParts(
+    p0: bigint,
+    p1: bigint,
+    p2: bigint,
+    p3: bigint
+  ): Uint8Array {
+    return pubkeyFromParts(p0, p1, p2, p3);
+  }
+
+  pubkeyToParts(
+    pubkey: Uint8Array
+  ): [bigint, bigint, bigint, bigint] {
+    return pubkeyToParts(pubkey);
+  }
+
   // -------------------------------------------------------------------------
   // Subscriptions
   // -------------------------------------------------------------------------
@@ -583,11 +696,47 @@ export class EncryptedForestClient {
     );
   }
 
-  subscribeToMoveEvents(
+  subscribeToInitPlanetEvents(
     callback: (logs: { signature: string; logs: string[] }) => void,
     commitment?: Commitment
   ): Subscription {
-    return subscribeToMoveEvents(
+    return subscribeToInitPlanetEvents(
+      this.connection,
+      callback,
+      this.programId,
+      commitment
+    );
+  }
+
+  subscribeToProcessMoveEvents(
+    callback: (logs: { signature: string; logs: string[] }) => void,
+    commitment?: Commitment
+  ): Subscription {
+    return subscribeToProcessMoveEvents(
+      this.connection,
+      callback,
+      this.programId,
+      commitment
+    );
+  }
+
+  subscribeToFlushPlanetEvents(
+    callback: (logs: { signature: string; logs: string[] }) => void,
+    commitment?: Commitment
+  ): Subscription {
+    return subscribeToFlushPlanetEvents(
+      this.connection,
+      callback,
+      this.programId,
+      commitment
+    );
+  }
+
+  subscribeToUpgradePlanetEvents(
+    callback: (logs: { signature: string; logs: string[] }) => void,
+    commitment?: Commitment
+  ): Subscription {
+    return subscribeToUpgradePlanetEvents(
       this.connection,
       callback,
       this.programId,

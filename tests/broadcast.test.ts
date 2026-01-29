@@ -2,10 +2,15 @@
  * Broadcast integration tests.
  *
  * Tests:
- * 1. Broadcast planet coordinates
+ * 1. Broadcast planet coordinates successfully
  * 2. Verify broadcast event contains (x, y, game_id, planet_hash, broadcaster)
- * 3. Verify broadcast with correct hash passes
- * 4. Reject broadcast with wrong hash
+ * 3. Reject broadcast with wrong hash
+ * 4. Reject broadcast with mismatched coordinates
+ * 5. Anyone can broadcast (permissionless)
+ * 6. Hash consistency between client and on-chain
+ *
+ * NOTE: broadcast is an unchanged plaintext instruction.
+ * It emits an unencrypted BroadcastEvent with (x, y, game_id, planet_hash, broadcaster).
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -16,6 +21,7 @@ import type { EncryptedForest } from "../target/types/encrypted_forest";
 import {
   getProviderAndProgram,
   readKpJson,
+  airdrop,
   createGame,
   defaultGameConfig,
   deriveGamePDA,
@@ -56,7 +62,6 @@ describe("Broadcast", () => {
           resolve();
         }
       );
-      // Timeout in case event does not fire
       setTimeout(() => resolve(), 5000);
     });
 
@@ -76,7 +81,6 @@ describe("Broadcast", () => {
 
     await listenerPromise;
 
-    // Verify event was emitted
     if (broadcastEvent) {
       expect(broadcastEvent.x.toString()).toBe(spawn.x.toString());
       expect(broadcastEvent.y.toString()).toBe(spawn.y.toString());
@@ -95,7 +99,6 @@ describe("Broadcast", () => {
     const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const [gamePDA] = deriveGamePDA(gameId, program.programId);
 
-    // Wrong hash
     const wrongHash = new Uint8Array(32);
     wrongHash.fill(0);
 
@@ -129,7 +132,7 @@ describe("Broadcast", () => {
       program.methods
         .broadcast(
           new BN(gameId.toString()),
-          new BN((spawn.x + 1n).toString()), // wrong x
+          new BN((spawn.x + 1n).toString()),
           new BN(spawn.y.toString()),
           Array.from(spawn.hash) as any
         )
@@ -148,16 +151,12 @@ describe("Broadcast", () => {
     await createGame(program, admin, config);
 
     const randomUser = Keypair.generate();
-    await provider.connection.requestAirdrop(
-      randomUser.publicKey,
-      1_000_000_000
-    );
-    await new Promise((r) => setTimeout(r, 1000)); // wait for airdrop
+    await airdrop(provider, randomUser.publicKey, 1);
 
     const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const [gamePDA] = deriveGamePDA(gameId, program.programId);
 
-    // Any signer can broadcast -- no ownership required
+    // Any signer can broadcast
     await program.methods
       .broadcast(
         new BN(gameId.toString()),
@@ -172,12 +171,10 @@ describe("Broadcast", () => {
       .signers([randomUser])
       .rpc({ commitment: "confirmed" });
 
-    // If we get here, it succeeded (no ownership or player check required)
     expect(true).toBe(true);
   });
 
   it("verifies hash consistency between client and on-chain", () => {
-    // Test that our computePlanetHash matches what the on-chain program expects
     const x = 42n;
     const y = -17n;
     const gameId = 12345n;
@@ -185,11 +182,11 @@ describe("Broadcast", () => {
     const hash = computePlanetHash(x, y, gameId);
     expect(hash.length).toBe(32);
 
-    // Same inputs should always produce same hash (deterministic)
+    // Deterministic
     const hash2 = computePlanetHash(x, y, gameId);
     expect(hash).toEqual(hash2);
 
-    // Different inputs should produce different hashes
+    // Different inputs produce different hashes
     const hash3 = computePlanetHash(x + 1n, y, gameId);
     expect(hash).not.toEqual(hash3);
   });

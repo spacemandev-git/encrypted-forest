@@ -4,10 +4,20 @@
  * Manages a reactive map of discovered planets. Auto-fetches
  * from IndexedDB on load, auto-persists changes in background,
  * and subscribes to planet account changes.
+ *
+ * Now supports encrypted on-chain state: fetches EncryptedCelestialBody
+ * accounts and decrypts them locally using the planet_hash as key material.
  */
 
 import { SvelteMap } from "svelte/reactivity";
-import type { EncryptedForestClient, DiscoveredPlanet, CelestialBody } from "@encrypted-forest/core";
+import type { EncryptedForestClient, DiscoveredPlanet } from "@encrypted-forest/core";
+import type { EncryptedCelestialBodyAccount } from "@encrypted-forest/core";
+import {
+  fetchEncryptedCelestialBody,
+  decryptPlanetState,
+  pubkeyFromParts,
+} from "@encrypted-forest/core";
+import type { PlanetState } from "@encrypted-forest/core";
 import {
   hashToHex,
   getAllPersistedPlanets,
@@ -16,19 +26,33 @@ import {
 } from "../persistence/db.js";
 
 /**
- * A planet entry combining discovery info with on-chain state.
+ * A planet entry combining discovery info with encrypted + decrypted state.
  */
 export interface PlanetEntry {
   /** Discovery info from local scanning */
   discovery: DiscoveredPlanet;
-  /** On-chain account state (null if not yet fetched) */
-  onChain: CelestialBody | null;
+  /** Raw encrypted on-chain account data (null if not yet fetched) */
+  encrypted: EncryptedCelestialBodyAccount | null;
+  /** Locally decrypted planet state (null if not yet decrypted) */
+  decrypted: PlanetState | null;
   /** hex-encoded hash for map key */
   hashHex: string;
 }
 
+/**
+ * Compare two Uint8Array values for equality.
+ */
+function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export class PlanetsStore {
   #client: EncryptedForestClient;
+  #mxePublicKey: Uint8Array;
   #gameId: bigint | null = null;
   #unsubscribeAll: (() => void) | null = null;
 
@@ -41,17 +65,25 @@ export class PlanetsStore {
   /** All planet entries as an array */
   all = $derived([...this.planets.values()]);
 
-  /** Planets owned by a specific pubkey (string comparison) */
+  /** Planets owned by a specific owner (passed as raw pubkey bytes) */
   ownedBy = $derived.by(() => {
-    return (ownerStr: string): PlanetEntry[] => {
-      return this.all.filter(
-        (p) => p.onChain?.owner?.toBase58() === ownerStr
-      );
+    return (ownerBytes: Uint8Array): PlanetEntry[] => {
+      return this.all.filter((p) => {
+        if (!p.decrypted || p.decrypted.ownerExists === 0) return false;
+        const ownerKey = pubkeyFromParts(
+          p.decrypted.owner0,
+          p.decrypted.owner1,
+          p.decrypted.owner2,
+          p.decrypted.owner3
+        );
+        return arraysEqual(ownerKey, ownerBytes);
+      });
     };
   });
 
-  constructor(client: EncryptedForestClient) {
+  constructor(client: EncryptedForestClient, mxePublicKey: Uint8Array) {
     this.#client = client;
+    this.#mxePublicKey = mxePublicKey;
   }
 
   /**
@@ -83,9 +115,31 @@ export class PlanetsStore {
             comets: p.comets,
           },
         },
-        onChain: null,
+        encrypted: null,
+        decrypted: null,
         hashHex: p.hashHex,
       };
+
+      // If we have cached encrypted data, restore it and attempt decryption
+      if (p.encNonce && p.encCiphertexts) {
+        try {
+          const cachedEncrypted: EncryptedCelestialBodyAccount = {
+            pubkey: p.encPubkey ? new Uint8Array(p.encPubkey) : this.#mxePublicKey,
+            nonce: new Uint8Array(p.encNonce),
+            ciphertexts: new Uint8Array(p.encCiphertexts),
+          };
+          entry.encrypted = cachedEncrypted;
+          entry.decrypted = decryptPlanetState(
+            entry.discovery.hash,
+            cachedEncrypted.pubkey,
+            cachedEncrypted.nonce,
+            cachedEncrypted.ciphertexts
+          );
+        } catch {
+          // Cached encrypted data may be stale; will re-fetch from chain
+        }
+      }
+
       this.planets.set(p.hashHex, entry);
     }
 
@@ -103,7 +157,8 @@ export class PlanetsStore {
 
     const entry: PlanetEntry = {
       discovery: discovered,
-      onChain: null,
+      encrypted: null,
+      decrypted: null,
       hashHex: hex,
     };
 
@@ -130,7 +185,8 @@ export class PlanetsStore {
 
       const entry: PlanetEntry = {
         discovery: d,
-        onChain: null,
+        encrypted: null,
+        decrypted: null,
         hashHex: hex,
       };
       this.planets.set(hex, entry);
@@ -202,6 +258,13 @@ export class PlanetsStore {
       lastFetched: Date.now(),
     };
 
+    // Persist encrypted account data if available
+    if (entry.encrypted) {
+      persisted.encPubkey = Array.from(entry.encrypted.pubkey);
+      persisted.encNonce = Array.from(entry.encrypted.nonce);
+      persisted.encCiphertexts = Array.from(entry.encrypted.ciphertexts);
+    }
+
     await persistPlanet(persisted);
   }
 
@@ -209,13 +272,37 @@ export class PlanetsStore {
     if (this.#gameId === null) return;
 
     try {
-      const body = await this.#client.getCelestialBody(
+      // Fetch the encrypted celestial body account from chain
+      const encAccount = await fetchEncryptedCelestialBody(
+        this.#client.program,
         this.#gameId,
-        entry.discovery.hash
+        entry.discovery.hash,
+        this.#client.programId
       );
+
+      // Decrypt locally using the planet hash as key material
+      let decrypted: PlanetState | null = null;
+      try {
+        decrypted = decryptPlanetState(
+          entry.discovery.hash,
+          encAccount.pubkey,
+          encAccount.nonce,
+          encAccount.ciphertexts
+        );
+      } catch {
+        // Decryption may fail if key material is wrong or data is corrupted
+      }
+
       // Update reactively by creating a new entry object
-      const updated = { ...entry, onChain: body };
+      const updated: PlanetEntry = {
+        ...entry,
+        encrypted: encAccount,
+        decrypted,
+      };
       this.planets.set(entry.hashHex, updated);
+
+      // Persist updated encrypted data to IndexedDB
+      this.#persistEntry(updated);
     } catch {
       // Planet may not exist on chain yet -- that is fine
     }
@@ -247,16 +334,10 @@ export class PlanetsStore {
         const entry = this.planets.get(hex);
         if (!entry || this.#gameId === null) return;
 
-        // Re-fetch the updated planet data
-        this.#client
-          .getCelestialBody(this.#gameId, planetHash)
-          .then((body) => {
-            const updated = { ...entry, onChain: body };
-            this.planets.set(hex, updated);
-          })
-          .catch(() => {
-            // ignore fetch errors on subscription callbacks
-          });
+        // Re-fetch and re-decrypt the updated planet data
+        this.#fetchOnChainState(entry).catch(() => {
+          // ignore fetch errors on subscription callbacks
+        });
       }
     );
   }
@@ -273,7 +354,8 @@ export class PlanetsStore {
  * Create a reactive planets store.
  */
 export function createPlanetsStore(
-  client: EncryptedForestClient
+  client: EncryptedForestClient,
+  mxePublicKey: Uint8Array
 ): PlanetsStore {
-  return new PlanetsStore(client);
+  return new PlanetsStore(client, mxePublicKey);
 }

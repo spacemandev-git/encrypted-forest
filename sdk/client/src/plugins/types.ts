@@ -29,18 +29,12 @@ export interface ReadonlyGameStore {
 export interface ReadonlyPlanetsStore {
   readonly planets: ReadonlyMap<
     string,
-    import("@encrypted-forest/core").DiscoveredPlanet & {
-      onChain?: import("@encrypted-forest/core").CelestialBody;
-    }
+    import("../stores/planets.svelte.js").PlanetEntry
   >;
   readonly count: number;
   getPlanet(
     hashHex: string
-  ):
-    | (import("@encrypted-forest/core").DiscoveredPlanet & {
-        onChain?: import("@encrypted-forest/core").CelestialBody;
-      })
-    | undefined;
+  ): import("../stores/planets.svelte.js").PlanetEntry | undefined;
 }
 
 /**

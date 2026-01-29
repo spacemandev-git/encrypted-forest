@@ -1,30 +1,29 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
-use arcium_client::idl::arcium::types::CallbackAccount;
+use arcium_client::idl::arcium::types::{CallbackAccount, CircuitSource, OffChainCircuitSource};
+use arcium_macros::circuit_hash;
 
 // ---------------------------------------------------------------------------
 // Computation definition offsets for each encrypted instruction
 // ---------------------------------------------------------------------------
-const COMP_DEF_OFFSET_CREATE_PLANET_KEY: u32 = comp_def_offset("create_planet_key");
-const COMP_DEF_OFFSET_VERIFY_SPAWN_COORDINATES: u32 = comp_def_offset("verify_spawn_coordinates");
-const COMP_DEF_OFFSET_RESOLVE_COMBAT: u32 = comp_def_offset("resolve_combat");
+const COMP_DEF_OFFSET_INIT_PLANET: u32 = comp_def_offset("init_planet");
+const COMP_DEF_OFFSET_INIT_SPAWN_PLANET: u32 = comp_def_offset("init_spawn_planet");
+const COMP_DEF_OFFSET_PROCESS_MOVE: u32 = comp_def_offset("process_move");
+const COMP_DEF_OFFSET_FLUSH_PLANET: u32 = comp_def_offset("flush_planet");
+const COMP_DEF_OFFSET_UPGRADE_PLANET: u32 = comp_def_offset("upgrade_planet");
 
 declare_id!("4R4Pxo65rnESAbndivR76UXP9ahX7WxczsZDWcryaM3c");
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-/// Maximum number of pending moves per planet
-const MAX_PENDING_MOVES: usize = 32;
-/// Maximum number of comets per celestial body
-const MAX_COMETS: usize = 2;
+const MAX_PENDING_MOVES: usize = 16;
+const PLANET_STATE_FIELDS: usize = 19;
+const _PENDING_MOVE_DATA_FIELDS: usize = 6;
 
 // ---------------------------------------------------------------------------
-// Hash-based noise helpers (on-chain, using blake3)
+// Hash helper
 // ---------------------------------------------------------------------------
-
-/// Compute the planet hash from coordinates and game_id using blake3.
-/// This is the canonical hash used for PDA seeds and fog-of-war.
 pub fn compute_planet_hash(x: i64, y: i64, game_id: u64) -> [u8; 32] {
     let mut input = [0u8; 24];
     input[0..8].copy_from_slice(&x.to_le_bytes());
@@ -33,320 +32,52 @@ pub fn compute_planet_hash(x: i64, y: i64, game_id: u64) -> [u8; 32] {
     *blake3::hash(&input).as_bytes()
 }
 
-/// Determine celestial body properties from a planet hash and noise thresholds.
-/// Returns None if the hash represents dead space.
-pub fn determine_celestial_body(
-    hash: &[u8; 32],
-    thresholds: &NoiseThresholds,
-) -> Option<CelestialBodyProperties> {
-    let byte0 = hash[0];
-    let byte1 = hash[1];
-    let byte2 = hash[2];
-    let byte3 = hash[3];
-    let byte4 = hash[4];
-    let byte5 = hash[5];
-
-    // Byte 0: dead space check
-    if byte0 < thresholds.dead_space_threshold {
-        return None;
-    }
-
-    // Byte 1: body type
-    let body_type = if byte1 < thresholds.planet_threshold {
-        CelestialBodyType::Planet
-    } else if byte1 < thresholds.quasar_threshold {
-        CelestialBodyType::Quasar
-    } else if byte1 < thresholds.spacetime_rip_threshold {
-        CelestialBodyType::SpacetimeRip
-    } else {
-        CelestialBodyType::AsteroidBelt
-    };
-
-    // Byte 2: size (1-6)
-    let size = if byte2 < thresholds.size_threshold_1 {
-        1u8 // Miniscule
-    } else if byte2 < thresholds.size_threshold_2 {
-        2 // Tiny
-    } else if byte2 < thresholds.size_threshold_3 {
-        3 // Small
-    } else if byte2 < thresholds.size_threshold_4 {
-        4 // Medium
-    } else if byte2 < thresholds.size_threshold_5 {
-        5 // Large
-    } else {
-        6 // Gargantuan
-    };
-
-    // Byte 3: comets (0-216 = none, 217-242 = one, 243-255 = two)
-    let num_comets = if byte3 <= 216 {
-        0u8
-    } else if byte3 <= 242 {
-        1
-    } else {
-        2
-    };
-
-    // Bytes 4-5: which stats comets boost (mod 6 for each)
-    let mut comets = Vec::new();
-    if num_comets >= 1 {
-        comets.push(comet_from_byte(byte4));
-    }
-    if num_comets >= 2 {
-        let mut second = comet_from_byte(byte5);
-        // Ensure second comet boosts a different stat
-        if num_comets == 2 && second == comets[0] {
-            second = comet_from_byte(byte5.wrapping_add(1));
-        }
-        comets.push(second);
-    }
-
-    Some(CelestialBodyProperties {
-        body_type,
-        size,
-        comets,
-    })
+// ---------------------------------------------------------------------------
+// Helper: extract [u8; 32] from a Vec<u8> at index i
+// ---------------------------------------------------------------------------
+fn extract_ct(data: &[u8], index: usize) -> [u8; 32] {
+    let start = index * 32;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&data[start..start + 32]);
+    out
 }
 
-fn comet_from_byte(b: u8) -> CometBoost {
-    match b % 6 {
-        0 => CometBoost::ShipCapacity,
-        1 => CometBoost::MetalCapacity,
-        2 => CometBoost::ShipGenSpeed,
-        3 => CometBoost::MetalGenSpeed,
-        4 => CometBoost::Range,
-        _ => CometBoost::LaunchVelocity,
-    }
-}
-
-/// Properties derived from noise function
-pub struct CelestialBodyProperties {
-    pub body_type: CelestialBodyType,
-    pub size: u8,
-    pub comets: Vec<CometBoost>,
-}
-
-/// Compute base stats for a celestial body given its type and size.
-/// Capacities scale quadratically with size, gen speeds scale linearly.
-pub fn base_stats(body_type: &CelestialBodyType, size: u8) -> CelestialBodyStats {
-    let s = size as u64;
-    let s_sq = s * s;
-
-    match body_type {
-        CelestialBodyType::Planet => CelestialBodyStats {
-            max_ship_capacity: 100 * s_sq,
-            ship_gen_speed: 1 * s,
-            max_metal_capacity: 0,
-            metal_gen_speed: 0,
-            range: 3 + s,
-            launch_velocity: 1 + s,
-            native_ships: if size == 1 { 0 } else { 10 * s },
-        },
-        CelestialBodyType::Quasar => CelestialBodyStats {
-            max_ship_capacity: 500 * s_sq,
-            ship_gen_speed: 0,
-            max_metal_capacity: 500 * s_sq,
-            metal_gen_speed: 0,
-            range: 2 + s,
-            launch_velocity: 1 + s,
-            native_ships: 20 * s,
-        },
-        CelestialBodyType::SpacetimeRip => CelestialBodyStats {
-            max_ship_capacity: 50 * s_sq,
-            ship_gen_speed: 1 * s,
-            max_metal_capacity: 0,
-            metal_gen_speed: 0,
-            range: 2 + s,
-            launch_velocity: 1 + s,
-            native_ships: 15 * s,
-        },
-        CelestialBodyType::AsteroidBelt => CelestialBodyStats {
-            max_ship_capacity: 80 * s_sq,
-            ship_gen_speed: 0,
-            max_metal_capacity: 200 * s_sq,
-            metal_gen_speed: 2 * s,
-            range: 2 + s,
-            launch_velocity: 1 + s,
-            native_ships: 10 * s,
-        },
-    }
-}
-
-pub struct CelestialBodyStats {
-    pub max_ship_capacity: u64,
-    pub ship_gen_speed: u64,
-    pub max_metal_capacity: u64,
-    pub metal_gen_speed: u64,
-    pub range: u64,
-    pub launch_velocity: u64,
-    pub native_ships: u64,
-}
-
-/// Apply comet boosts to stats. Each comet doubles one stat.
-pub fn apply_comet_boosts(stats: &mut CelestialBodyStats, comets: &[CometBoost]) {
-    for comet in comets {
-        match comet {
-            CometBoost::ShipCapacity => stats.max_ship_capacity *= 2,
-            CometBoost::MetalCapacity => stats.max_metal_capacity *= 2,
-            CometBoost::ShipGenSpeed => stats.ship_gen_speed *= 2,
-            CometBoost::MetalGenSpeed => stats.metal_gen_speed *= 2,
-            CometBoost::Range => stats.range *= 2,
-            CometBoost::LaunchVelocity => stats.launch_velocity *= 2,
-        }
-    }
-}
-
-/// Compute current ship count via lazy generation.
-pub fn compute_current_ships(
-    last_ship_count: u64,
-    max_capacity: u64,
-    gen_speed: u64,
-    last_updated_slot: u64,
-    current_slot: u64,
-    game_speed: u64,
-) -> u64 {
-    if gen_speed == 0 || current_slot <= last_updated_slot || game_speed == 0 {
-        return last_ship_count;
-    }
-    let elapsed = current_slot.saturating_sub(last_updated_slot);
-    let generated = gen_speed.saturating_mul(elapsed) / game_speed;
-    std::cmp::min(max_capacity, last_ship_count.saturating_add(generated))
-}
-
-/// Compute current metal count via lazy generation.
-pub fn compute_current_metal(
-    last_metal_count: u64,
-    max_capacity: u64,
-    gen_speed: u64,
-    last_updated_slot: u64,
-    current_slot: u64,
-    game_speed: u64,
-) -> u64 {
-    if gen_speed == 0 || current_slot <= last_updated_slot || game_speed == 0 {
-        return last_metal_count;
-    }
-    let elapsed = current_slot.saturating_sub(last_updated_slot);
-    let generated = gen_speed.saturating_mul(elapsed) / game_speed;
-    std::cmp::min(max_capacity, last_metal_count.saturating_add(generated))
-}
-
-/// Flush all pending moves that have landed (landing_slot <= current_slot).
-/// Moves are processed in landing_slot order.
-pub fn flush_pending_moves(
-    planet: &mut Account<CelestialBody>,
-    pending: &mut Account<PendingMoves>,
-    current_slot: u64,
-    game_speed: u64,
-) {
-    // First, compute current ships and metal via generation
-    // Only generate if planet has an owner (native population does not regenerate)
-    if planet.owner.is_some() {
-        planet.ship_count = compute_current_ships(
-            planet.ship_count,
-            planet.max_ship_capacity,
-            planet.ship_gen_speed,
-            planet.last_updated_slot,
-            current_slot,
-            game_speed,
-        );
-        planet.metal_count = compute_current_metal(
-            planet.metal_count,
-            planet.max_metal_capacity,
-            planet.metal_gen_speed,
-            planet.last_updated_slot,
-            current_slot,
-            game_speed,
-        );
-    }
-
-    // Sort pending moves by landing_slot (ascending)
-    pending.moves.sort_by_key(|m| m.landing_slot);
-
-    // Process moves that have landed
-    let mut i = 0;
-    while i < pending.moves.len() {
-        if pending.moves[i].landing_slot > current_slot {
-            break;
-        }
-
-        let pending_move = &pending.moves[i];
-        let is_friendly = planet.owner == Some(pending_move.attacker);
-
-        if is_friendly {
-            // Reinforcement: add ships and metal (capped)
-            planet.ship_count = std::cmp::min(
-                planet.max_ship_capacity,
-                planet.ship_count.saturating_add(pending_move.ships_sent),
-            );
-            planet.metal_count = std::cmp::min(
-                planet.max_metal_capacity,
-                planet.metal_count.saturating_add(pending_move.metal_sent),
-            );
-        } else {
-            // Combat: attacker ships vs defender ships
-            if pending_move.ships_sent > planet.ship_count {
-                // Attacker wins
-                let remaining = pending_move.ships_sent - planet.ship_count;
-                planet.ship_count = std::cmp::min(remaining, planet.max_ship_capacity);
-                planet.owner = Some(pending_move.attacker);
-                // Attacker gets the metal they sent
-                planet.metal_count = std::cmp::min(
-                    planet.max_metal_capacity,
-                    pending_move.metal_sent,
-                );
-            } else {
-                // Defender wins (or tie = defender wins)
-                planet.ship_count -= pending_move.ships_sent;
-                // Metal from attacker is lost in combat
-            }
-        }
-
-        i += 1;
-    }
-
-    // Remove processed moves
-    if i > 0 {
-        pending.moves.drain(0..i);
-    }
-
-    planet.last_updated_slot = current_slot;
-}
-
-/// Compute distance between two 2D points (integer Manhattan approximation).
-/// For simplicity we use Chebyshev distance as an upper bound.
-pub fn compute_distance(x1: i64, y1: i64, x2: i64, y2: i64) -> u64 {
-    let dx = (x1 - x2).unsigned_abs();
-    let dy = (y1 - y2).unsigned_abs();
-    // Euclidean approximation using integer sqrt would be ideal,
-    // but for game purposes we use max(dx, dy) + min(dx, dy)/2
-    let max_d = std::cmp::max(dx, dy);
-    let min_d = std::cmp::min(dx, dy);
-    max_d + min_d / 2
-}
-
-/// Compute ships remaining after distance decay.
-/// Every `range` distance traveled, 1 ship is lost.
-pub fn apply_distance_decay(ships: u64, distance: u64, range: u64) -> u64 {
-    if range == 0 {
-        return 0;
-    }
-    let lost = distance / range;
-    ships.saturating_sub(lost)
-}
-
-/// Compute landing slot based on distance and launch velocity.
-pub fn compute_landing_slot(current_slot: u64, distance: u64, launch_velocity: u64, game_speed: u64) -> u64 {
-    if launch_velocity == 0 {
-        return u64::MAX;
-    }
-    // Travel time in slots = distance * game_speed / launch_velocity
-    let travel_time = distance.saturating_mul(game_speed) / launch_velocity;
-    current_slot.saturating_add(travel_time)
-}
-
-/// Metal cost for upgrading a planet to the next level.
-pub fn upgrade_cost(current_level: u8) -> u64 {
-    // Exponential cost: 100 * 2^level
-    100u64.saturating_mul(1u64 << (current_level as u32))
+// ---------------------------------------------------------------------------
+// Helper: build ArgBuilder for PlanetState (19 fields) from packed ciphertexts
+// ---------------------------------------------------------------------------
+fn append_planet_state_args(mut builder: ArgBuilder, cts: &[u8]) -> ArgBuilder {
+    // body_type(u8), size(u8), owner_exists(u8)
+    builder = builder
+        .encrypted_u8(extract_ct(cts, 0))
+        .encrypted_u8(extract_ct(cts, 1))
+        .encrypted_u8(extract_ct(cts, 2));
+    // owner_0..3(u64)
+    builder = builder
+        .encrypted_u64(extract_ct(cts, 3))
+        .encrypted_u64(extract_ct(cts, 4))
+        .encrypted_u64(extract_ct(cts, 5))
+        .encrypted_u64(extract_ct(cts, 6));
+    // ship_count, max_ship_capacity, ship_gen_speed
+    builder = builder
+        .encrypted_u64(extract_ct(cts, 7))
+        .encrypted_u64(extract_ct(cts, 8))
+        .encrypted_u64(extract_ct(cts, 9));
+    // metal_count, max_metal_capacity, metal_gen_speed
+    builder = builder
+        .encrypted_u64(extract_ct(cts, 10))
+        .encrypted_u64(extract_ct(cts, 11))
+        .encrypted_u64(extract_ct(cts, 12));
+    // range, launch_velocity
+    builder = builder
+        .encrypted_u64(extract_ct(cts, 13))
+        .encrypted_u64(extract_ct(cts, 14));
+    // level(u8), comet_count(u8), comet_0(u8), comet_1(u8)
+    builder = builder
+        .encrypted_u8(extract_ct(cts, 15))
+        .encrypted_u8(extract_ct(cts, 16))
+        .encrypted_u8(extract_ct(cts, 17))
+        .encrypted_u8(extract_ct(cts, 18));
+    builder
 }
 
 // ===========================================================================
@@ -361,24 +92,83 @@ pub mod encrypted_forest {
     // Computation Definition Initializers
     // -----------------------------------------------------------------------
 
-    pub fn init_comp_def_create_planet_key(
-        ctx: Context<InitCreatePlanetKeyCompDef>,
+    pub fn init_comp_def_init_planet(
+        ctx: Context<InitInitPlanetCompDef>,
+        circuit_base_url: String,
     ) -> Result<()> {
-        init_comp_def(ctx.accounts, None, None)?;
+        let source_url = format!("{}/init_planet.arcis", circuit_base_url);
+        init_comp_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: source_url,
+                hash: circuit_hash!("init_planet"),
+            })),
+            None,
+        )?;
         Ok(())
     }
 
-    pub fn init_comp_def_verify_spawn(
-        ctx: Context<InitVerifySpawnCompDef>,
+    pub fn init_comp_def_init_spawn_planet(
+        ctx: Context<InitInitSpawnPlanetCompDef>,
+        circuit_base_url: String,
     ) -> Result<()> {
-        init_comp_def(ctx.accounts, None, None)?;
+        let source_url = format!("{}/init_spawn_planet.arcis", circuit_base_url);
+        init_comp_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: source_url,
+                hash: circuit_hash!("init_spawn_planet"),
+            })),
+            None,
+        )?;
         Ok(())
     }
 
-    pub fn init_comp_def_resolve_combat(
-        ctx: Context<InitResolveCombatCompDef>,
+    pub fn init_comp_def_process_move(
+        ctx: Context<InitProcessMoveCompDef>,
+        circuit_base_url: String,
     ) -> Result<()> {
-        init_comp_def(ctx.accounts, None, None)?;
+        let source_url = format!("{}/process_move.arcis", circuit_base_url);
+        init_comp_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: source_url,
+                hash: circuit_hash!("process_move"),
+            })),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn init_comp_def_flush_planet(
+        ctx: Context<InitFlushPlanetCompDef>,
+        circuit_base_url: String,
+    ) -> Result<()> {
+        let source_url = format!("{}/flush_planet.arcis", circuit_base_url);
+        init_comp_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: source_url,
+                hash: circuit_hash!("flush_planet"),
+            })),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn init_comp_def_upgrade_planet(
+        ctx: Context<InitUpgradePlanetCompDef>,
+        circuit_base_url: String,
+    ) -> Result<()> {
+        let source_url = format!("{}/upgrade_planet.arcis", circuit_base_url);
+        init_comp_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: source_url,
+                hash: circuit_hash!("upgrade_planet"),
+            })),
+            None,
+        )?;
         Ok(())
     }
 
@@ -386,7 +176,6 @@ pub mod encrypted_forest {
     // Game Management
     // -----------------------------------------------------------------------
 
-    /// Create a new game instance. Permissionless.
     pub fn create_game(
         ctx: Context<CreateGame>,
         game_id: u64,
@@ -421,11 +210,9 @@ pub mod encrypted_forest {
         Ok(())
     }
 
-    /// Initialize a player account for a game.
     pub fn init_player(ctx: Context<InitPlayer>, _game_id: u64) -> Result<()> {
         let game = &ctx.accounts.game;
 
-        // If whitelist is enabled, server must co-sign
         if game.whitelist {
             require!(
                 ctx.accounts.server.is_some(),
@@ -449,25 +236,135 @@ pub mod encrypted_forest {
     }
 
     // -----------------------------------------------------------------------
-    // Spawn - Queue Arcium verify_spawn_coordinates computation
+    // Queue init_planet
+    // Packed params: ciphertexts = 12 * 32 bytes, pubkey = 32, nonce = 16, observer = 32
     // -----------------------------------------------------------------------
 
-    /// Spawn into the game at encrypted coordinates.
-    /// Queues an Arcium computation to verify the coordinates hash to a
-    /// valid Miniscule Planet. The callback will finalize the spawn.
-    pub fn spawn(
-        ctx: Context<Spawn>,
+    pub fn queue_init_planet(
+        ctx: Context<QueueInitPlanet>,
         computation_offset: u64,
-        // Encrypted SpawnInput fields
-        ciphertext_x: [u8; 32],
-        ciphertext_y: [u8; 32],
-        ciphertext_game_id: [u8; 32],
-        ciphertext_dead_space_threshold: [u8; 32],
-        ciphertext_planet_threshold: [u8; 32],
-        ciphertext_size_threshold_1: [u8; 32],
+        planet_hash: [u8; 32],
+        // All 12 ciphertexts packed: x, y, game_id, dead_space, planet, quasar, spacetime, s1-s5
+        ciphertexts: Vec<u8>,
         pubkey: [u8; 32],
         nonce: u128,
+        observer_pubkey: [u8; 32],
     ) -> Result<()> {
+        require!(ciphertexts.len() == 12 * 32, ErrorCode::InvalidInitPlanet);
+
+        let game = &ctx.accounts.game;
+        let clock = Clock::get()?;
+        require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
+
+        let body = &mut ctx.accounts.celestial_body;
+        body.planet_hash = planet_hash;
+        body.last_updated_slot = clock.slot;
+        body.last_flushed_slot = clock.slot;
+
+        let pending = &mut ctx.accounts.pending_moves;
+        pending.game_id = game.game_id;
+        pending.planet_hash = planet_hash;
+        pending.move_count = 0;
+        pending.moves = Vec::new();
+
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(nonce)
+            .encrypted_u64(extract_ct(&ciphertexts, 0))  // x
+            .encrypted_u64(extract_ct(&ciphertexts, 1))  // y
+            .encrypted_u64(extract_ct(&ciphertexts, 2))  // game_id
+            .encrypted_u8(extract_ct(&ciphertexts, 3))   // dead_space
+            .encrypted_u8(extract_ct(&ciphertexts, 4))   // planet_thresh
+            .encrypted_u8(extract_ct(&ciphertexts, 5))   // quasar_thresh
+            .encrypted_u8(extract_ct(&ciphertexts, 6))   // spacetime_thresh
+            .encrypted_u8(extract_ct(&ciphertexts, 7))   // size_1
+            .encrypted_u8(extract_ct(&ciphertexts, 8))   // size_2
+            .encrypted_u8(extract_ct(&ciphertexts, 9))   // size_3
+            .encrypted_u8(extract_ct(&ciphertexts, 10))  // size_4
+            .encrypted_u8(extract_ct(&ciphertexts, 11))  // size_5
+            .x25519_pubkey(observer_pubkey)
+            .build();
+
+        let body_pda = ctx.accounts.celestial_body.key();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            None,
+            vec![InitPlanetCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[CallbackAccount {
+                    pubkey: body_pda,
+                    is_writable: true,
+                }],
+            )?],
+            1,
+            0,
+        )?;
+
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "init_planet")]
+    pub fn init_planet_callback(
+        ctx: Context<InitPlanetCallback>,
+        output: SignedComputationOutputs<InitPlanetOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
+
+        let planet = &mut ctx.accounts.celestial_body;
+        planet.enc_pubkey = enc_state.encryption_key;
+        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+        let mut i = 0;
+        while i < PLANET_STATE_FIELDS {
+            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+            i += 1;
+        }
+        planet.last_updated_slot = Clock::get()?.slot;
+
+        emit!(InitPlanetEvent {
+            encrypted_hash_0: revealed.ciphertexts[0],
+            encrypted_hash_1: revealed.ciphertexts[1],
+            encrypted_hash_2: revealed.ciphertexts[2],
+            encrypted_hash_3: revealed.ciphertexts[3],
+            encrypted_valid: revealed.ciphertexts[4],
+            encryption_key: revealed.encryption_key,
+            nonce: revealed.nonce.to_le_bytes(),
+        });
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Queue init_spawn_planet
+    // Packed params: ciphertexts = 16 * 32 bytes
+    // -----------------------------------------------------------------------
+
+    pub fn queue_init_spawn_planet(
+        ctx: Context<QueueInitSpawnPlanet>,
+        computation_offset: u64,
+        planet_hash: [u8; 32],
+        // 16 ciphertexts packed: x, y, game_id, 9 thresholds, 4 player_key parts
+        ciphertexts: Vec<u8>,
+        pubkey: [u8; 32],
+        nonce: u128,
+        observer_pubkey: [u8; 32],
+    ) -> Result<()> {
+        require!(ciphertexts.len() == 16 * 32, ErrorCode::InvalidSpawnValidation);
+
         let player = &ctx.accounts.player;
         require!(!player.has_spawned, ErrorCode::AlreadySpawned);
 
@@ -476,32 +373,50 @@ pub mod encrypted_forest {
         require!(clock.slot >= game.start_slot, ErrorCode::GameNotStarted);
         require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
 
+        let body = &mut ctx.accounts.celestial_body;
+        body.planet_hash = planet_hash;
+        body.last_updated_slot = clock.slot;
+        body.last_flushed_slot = clock.slot;
+
+        let pending = &mut ctx.accounts.pending_moves;
+        pending.game_id = game.game_id;
+        pending.planet_hash = planet_hash;
+        pending.move_count = 0;
+        pending.moves = Vec::new();
+
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // Build args for verify_spawn_coordinates encrypted instruction
-        // SpawnInput has: x(i64), y(i64), game_id(u64), dead_space_threshold(u8),
-        //   planet_threshold(u8), size_threshold_1(u8)
         let args = ArgBuilder::new()
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
-            .encrypted_u64(ciphertext_x)        // x as i64 -> encrypted as u64
-            .encrypted_u64(ciphertext_y)        // y as i64 -> encrypted as u64
-            .encrypted_u64(ciphertext_game_id)
-            .encrypted_u8(ciphertext_dead_space_threshold)
-            .encrypted_u8(ciphertext_planet_threshold)
-            .encrypted_u8(ciphertext_size_threshold_1)
+            .encrypted_u64(extract_ct(&ciphertexts, 0))   // x
+            .encrypted_u64(extract_ct(&ciphertexts, 1))   // y
+            .encrypted_u64(extract_ct(&ciphertexts, 2))   // game_id
+            .encrypted_u8(extract_ct(&ciphertexts, 3))    // dead_space
+            .encrypted_u8(extract_ct(&ciphertexts, 4))    // planet
+            .encrypted_u8(extract_ct(&ciphertexts, 5))    // quasar
+            .encrypted_u8(extract_ct(&ciphertexts, 6))    // spacetime
+            .encrypted_u8(extract_ct(&ciphertexts, 7))    // s1
+            .encrypted_u8(extract_ct(&ciphertexts, 8))    // s2
+            .encrypted_u8(extract_ct(&ciphertexts, 9))    // s3
+            .encrypted_u8(extract_ct(&ciphertexts, 10))   // s4
+            .encrypted_u8(extract_ct(&ciphertexts, 11))   // s5
+            .encrypted_u64(extract_ct(&ciphertexts, 12))  // player_key_0
+            .encrypted_u64(extract_ct(&ciphertexts, 13))  // player_key_1
+            .encrypted_u64(extract_ct(&ciphertexts, 14))  // player_key_2
+            .encrypted_u64(extract_ct(&ciphertexts, 15))  // player_key_3
+            .x25519_pubkey(observer_pubkey)
             .build();
 
-        // Callback will receive player + game accounts to finalize spawn
         let player_pda = ctx.accounts.player.key();
-        let game_pda = ctx.accounts.game.key();
+        let body_pda = ctx.accounts.celestial_body.key();
 
         queue_computation(
             ctx.accounts,
             computation_offset,
             args,
             None,
-            vec![VerifySpawnCoordinatesCallback::callback_ix(
+            vec![InitSpawnPlanetCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[
@@ -510,8 +425,8 @@ pub mod encrypted_forest {
                         is_writable: true,
                     },
                     CallbackAccount {
-                        pubkey: game_pda,
-                        is_writable: false,
+                        pubkey: body_pda,
+                        is_writable: true,
                     },
                 ],
             )?],
@@ -522,276 +437,404 @@ pub mod encrypted_forest {
         Ok(())
     }
 
-    /// Callback for verify_spawn_coordinates.
-    /// On success, emits the encrypted spawn result.
-    #[arcium_callback(encrypted_ix = "verify_spawn_coordinates")]
-    pub fn verify_spawn_coordinates_callback(
-        ctx: Context<VerifySpawnCoordinatesCallback>,
-        output: SignedComputationOutputs<VerifySpawnCoordinatesOutput>,
+    #[arcium_callback(encrypted_ix = "init_spawn_planet")]
+    pub fn init_spawn_planet_callback(
+        ctx: Context<InitSpawnPlanetCallback>,
+        output: SignedComputationOutputs<InitSpawnPlanetOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
         ) {
-            Ok(VerifySpawnCoordinatesOutput { field_0 }) => field_0,
+            Ok(o) => o,
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        // Emit the encrypted spawn result for the client to decrypt
-        // field_0 is SharedEncryptedStruct<5>: valid(u8), hash_0..3(u64)
-        emit!(SpawnResultEvent {
-            encrypted_valid: o.ciphertexts[0],
-            encrypted_hash_0: o.ciphertexts[1],
-            encrypted_hash_1: o.ciphertexts[2],
-            encrypted_hash_2: o.ciphertexts[3],
-            encrypted_hash_3: o.ciphertexts[4],
-            encryption_key: o.encryption_key,
-            nonce: o.nonce.to_le_bytes(),
-        });
-
-        // Mark player as spawned
-        ctx.accounts.player.has_spawned = true;
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Create Planet (on-chain, after player knows the hash)
-    // -----------------------------------------------------------------------
-
-    /// Create a celestial body account at known coordinates.
-    /// The caller provides (x, y, game_id) in plaintext and the program
-    /// verifies the hash matches, determines properties via noise function,
-    /// and initializes the account.
-    pub fn create_planet(
-        ctx: Context<CreatePlanet>,
-        _game_id: u64,
-        x: i64,
-        y: i64,
-        planet_hash: [u8; 32],
-    ) -> Result<()> {
-        let game = &ctx.accounts.game;
-        let clock = Clock::get()?;
-        require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
-
-        // Verify the hash matches coordinates
-        let computed_hash = compute_planet_hash(x, y, game.game_id);
-        require!(computed_hash == planet_hash, ErrorCode::InvalidPlanetHash);
-
-        // Check coordinates are within map bounds
-        let half = (game.map_diameter / 2) as i64;
-        require!(
-            x >= -half && x <= half && y >= -half && y <= half,
-            ErrorCode::CoordinatesOutOfBounds
-        );
-
-        // Determine celestial body properties from hash
-        let props = determine_celestial_body(&planet_hash, &game.noise_thresholds)
-            .ok_or(ErrorCode::DeadSpace)?;
-
-        let mut stats = base_stats(&props.body_type, props.size);
-        apply_comet_boosts(&mut stats, &props.comets);
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
 
         let planet = &mut ctx.accounts.celestial_body;
-        planet.body_type = props.body_type;
-        planet.size = props.size;
-        planet.owner = None;
-        planet.ship_count = stats.native_ships;
-        planet.max_ship_capacity = stats.max_ship_capacity;
-        planet.ship_gen_speed = stats.ship_gen_speed;
-        planet.metal_count = 0;
-        planet.max_metal_capacity = stats.max_metal_capacity;
-        planet.metal_gen_speed = stats.metal_gen_speed;
-        planet.range = stats.range;
-        planet.launch_velocity = stats.launch_velocity;
-        planet.level = 1;
-        planet.comets = props.comets;
-        planet.last_updated_slot = clock.slot;
-        planet.planet_hash = planet_hash;
-
-        // Initialize pending moves account
-        let pending = &mut ctx.accounts.pending_moves;
-        pending.game_id = game.game_id;
-        pending.planet_hash = planet_hash;
-        pending.moves = Vec::new();
-
-        Ok(())
-    }
-
-    /// Claim ownership of a planet during spawn.
-    /// Called after create_planet, sets the spawning player as owner
-    /// and resets the planet to spawn state (0 ships for Miniscule).
-    pub fn claim_spawn_planet(
-        ctx: Context<ClaimSpawnPlanet>,
-        _game_id: u64,
-        _planet_hash: [u8; 32],
-    ) -> Result<()> {
-        let player = &ctx.accounts.player;
-        require!(player.has_spawned, ErrorCode::NotSpawned);
-
-        let planet = &mut ctx.accounts.celestial_body;
-        require!(planet.owner.is_none(), ErrorCode::PlanetAlreadyOwned);
-        require!(planet.size == 1, ErrorCode::InvalidSpawnPlanet);
-        require!(
-            planet.body_type == CelestialBodyType::Planet,
-            ErrorCode::InvalidSpawnPlanet
-        );
-
-        planet.owner = Some(player.owner);
-        planet.ship_count = 0; // Miniscule planets start with 0 ships
+        planet.enc_pubkey = enc_state.encryption_key;
+        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+        let mut i = 0;
+        while i < PLANET_STATE_FIELDS {
+            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+            i += 1;
+        }
         planet.last_updated_slot = Clock::get()?.slot;
 
+        ctx.accounts.player.has_spawned = true;
+
+        emit!(InitSpawnPlanetEvent {
+            encrypted_hash_0: revealed.ciphertexts[0],
+            encrypted_hash_1: revealed.ciphertexts[1],
+            encrypted_hash_2: revealed.ciphertexts[2],
+            encrypted_hash_3: revealed.ciphertexts[3],
+            encrypted_valid: revealed.ciphertexts[4],
+            encrypted_spawn_valid: revealed.ciphertexts[5],
+            encryption_key: revealed.encryption_key,
+            nonce: revealed.nonce.to_le_bytes(),
+        });
+
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Move Ships
+    // Queue process_move
+    // state_cts = 19 * 32 bytes, move_cts = 13 * 32 bytes
     // -----------------------------------------------------------------------
 
-    /// Move ships (and optionally metal) from source planet to target planet.
-    /// Flushes pending moves on source before processing.
-    pub fn move_ships(
-        ctx: Context<MoveShips>,
-        _game_id: u64,
-        _source_hash: [u8; 32],
-        _target_hash: [u8; 32],
-        ships_to_send: u64,
-        metal_to_send: u64,
-        source_x: i64,
-        source_y: i64,
-        target_x: i64,
-        target_y: i64,
+    pub fn queue_process_move(
+        ctx: Context<QueueProcessMove>,
+        computation_offset: u64,
+        state_cts: Vec<u8>,       // 19 * 32 = 608 bytes
+        state_pubkey: [u8; 32],
+        state_nonce: u128,
+        move_cts: Vec<u8>,        // 13 * 32 = 416 bytes
+        move_pubkey: [u8; 32],
+        move_nonce: u128,
+        observer_pubkey: [u8; 32],
     ) -> Result<()> {
+        require!(state_cts.len() == 19 * 32, ErrorCode::InvalidMoveInput);
+        require!(move_cts.len() == 13 * 32, ErrorCode::InvalidMoveInput);
+
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
         require!(clock.slot >= game.start_slot, ErrorCode::GameNotStarted);
         require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
-        require!(ships_to_send > 0, ErrorCode::MustSendShips);
 
-        let source = &mut ctx.accounts.source_planet;
-        let source_pending = &mut ctx.accounts.source_pending;
-
-        // Verify ownership
         require!(
-            source.owner == Some(ctx.accounts.player_owner.key()),
-            ErrorCode::NotPlanetOwner
-        );
-
-        // Flush pending moves on source planet first
-        flush_pending_moves(source, source_pending, clock.slot, game.game_speed);
-
-        // Check source has enough ships and metal
-        require!(source.ship_count >= ships_to_send, ErrorCode::InsufficientShips);
-        require!(source.metal_count >= metal_to_send, ErrorCode::InsufficientMetal);
-
-        // Compute distance and apply range check
-        let distance = compute_distance(source_x, source_y, target_x, target_y);
-        let surviving_ships = apply_distance_decay(ships_to_send, distance, source.range);
-        require!(surviving_ships > 0, ErrorCode::NoShipsSurviveDistance);
-
-        // Compute landing slot
-        let landing_slot = compute_landing_slot(
-            clock.slot,
-            distance,
-            source.launch_velocity,
-            game.game_speed,
-        );
-
-        // Deduct from source
-        source.ship_count -= ships_to_send;
-        source.metal_count -= metal_to_send;
-        source.last_updated_slot = clock.slot;
-
-        // Push to target's pending moves
-        let target_pending = &mut ctx.accounts.target_pending;
-        require!(
-            target_pending.moves.len() < MAX_PENDING_MOVES,
+            ctx.accounts.target_pending.moves.len() < MAX_PENDING_MOVES,
             ErrorCode::TooManyPendingMoves
         );
 
-        target_pending.moves.push(PendingMove {
-            source_planet_hash: source.planet_hash,
-            ships_sent: surviving_ships,
-            metal_sent: metal_to_send,
-            landing_slot,
-            attacker: ctx.accounts.player_owner.key(),
-        });
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        emit!(MoveEvent {
-            source_hash: source.planet_hash,
-            target_hash: ctx.accounts.target_planet.planet_hash,
-            ships_sent: ships_to_send,
-            ships_arriving: surviving_ships,
-            metal_sent: metal_to_send,
-            landing_slot,
-            player: ctx.accounts.player_owner.key(),
+        // First Enc<Shared, PlanetState>
+        let mut builder = ArgBuilder::new()
+            .x25519_pubkey(state_pubkey)
+            .plaintext_u128(state_nonce);
+        builder = append_planet_state_args(builder, &state_cts);
+
+        // Second Enc<Shared, ProcessMoveInput>
+        builder = builder
+            .x25519_pubkey(move_pubkey)
+            .plaintext_u128(move_nonce)
+            .encrypted_u64(extract_ct(&move_cts, 0))   // player_key_0
+            .encrypted_u64(extract_ct(&move_cts, 1))   // player_key_1
+            .encrypted_u64(extract_ct(&move_cts, 2))   // player_key_2
+            .encrypted_u64(extract_ct(&move_cts, 3))   // player_key_3
+            .encrypted_u64(extract_ct(&move_cts, 4))   // ships_to_send
+            .encrypted_u64(extract_ct(&move_cts, 5))   // metal_to_send
+            .encrypted_u64(extract_ct(&move_cts, 6))   // source_x
+            .encrypted_u64(extract_ct(&move_cts, 7))   // source_y
+            .encrypted_u64(extract_ct(&move_cts, 8))   // target_x
+            .encrypted_u64(extract_ct(&move_cts, 9))   // target_y
+            .encrypted_u64(extract_ct(&move_cts, 10))  // current_slot
+            .encrypted_u64(extract_ct(&move_cts, 11))  // game_speed
+            .encrypted_u64(extract_ct(&move_cts, 12))  // last_updated_slot
+            .x25519_pubkey(observer_pubkey);
+
+        let args = builder.build();
+
+        let source_body_pda = ctx.accounts.source_body.key();
+        let target_pending_pda = ctx.accounts.target_pending.key();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            None,
+            vec![ProcessMoveCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[
+                    CallbackAccount {
+                        pubkey: source_body_pda,
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: target_pending_pda,
+                        is_writable: true,
+                    },
+                ],
+            )?],
+            1,
+            0,
+        )?;
+
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "process_move")]
+    pub fn process_move_callback(
+        ctx: Context<ProcessMoveCallback>,
+        output: SignedComputationOutputs<ProcessMoveOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+
+        let enc_state = &o.field_0.field_0;
+        let enc_move_data = &o.field_0.field_1;
+        let revealed = &o.field_0.field_2;
+
+        let source = &mut ctx.accounts.source_body;
+        source.enc_pubkey = enc_state.encryption_key;
+        source.enc_nonce = enc_state.nonce.to_le_bytes();
+        let mut i = 0;
+        while i < PLANET_STATE_FIELDS {
+            source.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+            i += 1;
+        }
+        source.last_updated_slot = Clock::get()?.slot;
+
+        let target_pending = &mut ctx.accounts.target_pending;
+        let new_move = EncryptedPendingMove {
+            active: true,
+            landing_slot: Clock::get()?.slot,
+            enc_pubkey: enc_move_data.encryption_key,
+            enc_nonce: enc_move_data.nonce.to_le_bytes(),
+            enc_ciphertexts: [
+                enc_move_data.ciphertexts[0],
+                enc_move_data.ciphertexts[1],
+                enc_move_data.ciphertexts[2],
+                enc_move_data.ciphertexts[3],
+                enc_move_data.ciphertexts[4],
+                enc_move_data.ciphertexts[5],
+            ],
+        };
+        target_pending.moves.push(new_move);
+        target_pending.move_count = target_pending.moves.len() as u8;
+
+        emit!(ProcessMoveEvent {
+            encrypted_landing_slot: revealed.ciphertexts[0],
+            encrypted_surviving_ships: revealed.ciphertexts[1],
+            encrypted_valid: revealed.ciphertexts[2],
+            encryption_key: revealed.encryption_key,
+            nonce: revealed.nonce.to_le_bytes(),
         });
 
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Upgrade
+    // Queue flush_planet
+    // state_cts = 19 * 32, flush_cts = 10 * 32
     // -----------------------------------------------------------------------
 
-    /// Upgrade a Planet-type celestial body. Spends metal to level up.
-    /// Player chooses Range or LaunchVelocity focus.
-    /// Both choices also double ship/metal capacities and ship gen speed.
-    pub fn upgrade(
-        ctx: Context<Upgrade>,
-        _game_id: u64,
-        _planet_hash: [u8; 32],
-        focus: UpgradeFocus,
+    pub fn queue_flush_planet(
+        ctx: Context<QueueFlushPlanet>,
+        computation_offset: u64,
+        _move_index: u8,
+        state_cts: Vec<u8>,      // 19 * 32
+        state_pubkey: [u8; 32],
+        state_nonce: u128,
+        flush_cts: Vec<u8>,      // 10 * 32
+        flush_pubkey: [u8; 32],
+        flush_nonce: u128,
     ) -> Result<()> {
+        require!(state_cts.len() == 19 * 32, ErrorCode::FlushFailed);
+        require!(flush_cts.len() == 10 * 32, ErrorCode::FlushFailed);
+
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let mut builder = ArgBuilder::new()
+            .x25519_pubkey(state_pubkey)
+            .plaintext_u128(state_nonce);
+        builder = append_planet_state_args(builder, &state_cts);
+
+        builder = builder
+            .x25519_pubkey(flush_pubkey)
+            .plaintext_u128(flush_nonce)
+            .encrypted_u64(extract_ct(&flush_cts, 0))  // current_slot
+            .encrypted_u64(extract_ct(&flush_cts, 1))  // game_speed
+            .encrypted_u64(extract_ct(&flush_cts, 2))  // last_updated_slot
+            .encrypted_u64(extract_ct(&flush_cts, 3))  // move_ships
+            .encrypted_u64(extract_ct(&flush_cts, 4))  // move_metal
+            .encrypted_u64(extract_ct(&flush_cts, 5))  // move_attacker_0
+            .encrypted_u64(extract_ct(&flush_cts, 6))  // move_attacker_1
+            .encrypted_u64(extract_ct(&flush_cts, 7))  // move_attacker_2
+            .encrypted_u64(extract_ct(&flush_cts, 8))  // move_attacker_3
+            .encrypted_u8(extract_ct(&flush_cts, 9));  // move_has_landed
+
+        let args = builder.build();
+
+        let body_pda = ctx.accounts.celestial_body.key();
+        let pending_pda = ctx.accounts.pending_moves.key();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            None,
+            vec![FlushPlanetCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[
+                    CallbackAccount {
+                        pubkey: body_pda,
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: pending_pda,
+                        is_writable: true,
+                    },
+                ],
+            )?],
+            1,
+            0,
+        )?;
+
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "flush_planet")]
+    pub fn flush_planet_callback(
+        ctx: Context<FlushPlanetCallback>,
+        output: SignedComputationOutputs<FlushPlanetOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
+
+        let planet = &mut ctx.accounts.celestial_body;
+        planet.enc_pubkey = enc_state.encryption_key;
+        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+        let mut i = 0;
+        while i < PLANET_STATE_FIELDS {
+            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+            i += 1;
+        }
+        let slot = Clock::get()?.slot;
+        planet.last_updated_slot = slot;
+        planet.last_flushed_slot = slot;
+
+        let pending = &mut ctx.accounts.pending_moves;
+        if !pending.moves.is_empty() {
+            pending.moves.remove(0);
+            pending.move_count = pending.moves.len() as u8;
+        }
+
+        emit!(FlushPlanetEvent {
+            planet_hash: planet.planet_hash,
+            encrypted_success: revealed.ciphertexts[0],
+            encryption_key: revealed.encryption_key,
+            nonce: revealed.nonce.to_le_bytes(),
+        });
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Queue upgrade_planet
+    // state_cts = 19 * 32, upgrade_cts = 8 * 32
+    // -----------------------------------------------------------------------
+
+    pub fn queue_upgrade_planet(
+        ctx: Context<QueueUpgradePlanet>,
+        computation_offset: u64,
+        state_cts: Vec<u8>,       // 19 * 32
+        state_pubkey: [u8; 32],
+        state_nonce: u128,
+        upgrade_cts: Vec<u8>,     // 8 * 32
+        upgrade_pubkey: [u8; 32],
+        upgrade_nonce: u128,
+    ) -> Result<()> {
+        require!(state_cts.len() == 19 * 32, ErrorCode::UpgradeFailed);
+        require!(upgrade_cts.len() == 8 * 32, ErrorCode::UpgradeFailed);
+
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
         require!(clock.slot >= game.start_slot, ErrorCode::GameNotStarted);
         require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
 
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let mut builder = ArgBuilder::new()
+            .x25519_pubkey(state_pubkey)
+            .plaintext_u128(state_nonce);
+        builder = append_planet_state_args(builder, &state_cts);
+
+        builder = builder
+            .x25519_pubkey(upgrade_pubkey)
+            .plaintext_u128(upgrade_nonce)
+            .encrypted_u64(extract_ct(&upgrade_cts, 0))  // player_key_0
+            .encrypted_u64(extract_ct(&upgrade_cts, 1))  // player_key_1
+            .encrypted_u64(extract_ct(&upgrade_cts, 2))  // player_key_2
+            .encrypted_u64(extract_ct(&upgrade_cts, 3))  // player_key_3
+            .encrypted_u8(extract_ct(&upgrade_cts, 4))   // focus
+            .encrypted_u64(extract_ct(&upgrade_cts, 5))  // current_slot
+            .encrypted_u64(extract_ct(&upgrade_cts, 6))  // game_speed
+            .encrypted_u64(extract_ct(&upgrade_cts, 7)); // last_updated_slot
+
+        let args = builder.build();
+
+        let body_pda = ctx.accounts.celestial_body.key();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            None,
+            vec![UpgradePlanetCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[CallbackAccount {
+                    pubkey: body_pda,
+                    is_writable: true,
+                }],
+            )?],
+            1,
+            0,
+        )?;
+
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "upgrade_planet")]
+    pub fn upgrade_planet_callback(
+        ctx: Context<UpgradePlanetCallback>,
+        output: SignedComputationOutputs<UpgradePlanetOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
+
         let planet = &mut ctx.accounts.celestial_body;
-        let pending = &mut ctx.accounts.pending_moves;
-
-        // Only planets can be upgraded
-        require!(
-            planet.body_type == CelestialBodyType::Planet,
-            ErrorCode::CannotUpgradeNonPlanet
-        );
-
-        // Must own the planet
-        require!(
-            planet.owner == Some(ctx.accounts.player_owner.key()),
-            ErrorCode::NotPlanetOwner
-        );
-
-        // Flush pending moves first
-        flush_pending_moves(planet, pending, clock.slot, game.game_speed);
-
-        // Compute upgrade cost
-        let cost = upgrade_cost(planet.level);
-        require!(planet.metal_count >= cost, ErrorCode::InsufficientMetal);
-
-        // Deduct metal and level up
-        planet.metal_count -= cost;
-        planet.level += 1;
-
-        // Both options double caps and gen speed
-        planet.max_ship_capacity *= 2;
-        planet.max_metal_capacity *= 2;
-        planet.ship_gen_speed *= 2;
-
-        // Focus-specific bonus
-        match focus {
-            UpgradeFocus::Range => planet.range *= 2,
-            UpgradeFocus::LaunchVelocity => planet.launch_velocity *= 2,
+        planet.enc_pubkey = enc_state.encryption_key;
+        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+        let mut i = 0;
+        while i < PLANET_STATE_FIELDS {
+            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+            i += 1;
         }
+        planet.last_updated_slot = Clock::get()?.slot;
 
-        planet.last_updated_slot = clock.slot;
-
-        emit!(UpgradeEvent {
+        emit!(UpgradePlanetEvent {
             planet_hash: planet.planet_hash,
-            new_level: planet.level,
-            focus,
-            player: ctx.accounts.player_owner.key(),
+            encrypted_success: revealed.ciphertexts[0],
+            encrypted_new_level: revealed.ciphertexts[1],
+            encryption_key: revealed.encryption_key,
+            nonce: revealed.nonce.to_le_bytes(),
         });
 
         Ok(())
@@ -801,7 +844,6 @@ pub mod encrypted_forest {
     // Broadcast
     // -----------------------------------------------------------------------
 
-    /// Broadcast planet coordinates publicly so all players can discover it.
     pub fn broadcast(
         ctx: Context<Broadcast>,
         _game_id: u64,
@@ -810,8 +852,6 @@ pub mod encrypted_forest {
         planet_hash: [u8; 32],
     ) -> Result<()> {
         let game = &ctx.accounts.game;
-
-        // Verify the hash
         let computed = compute_planet_hash(x, y, game.game_id);
         require!(computed == planet_hash, ErrorCode::InvalidPlanetHash);
 
@@ -830,12 +870,10 @@ pub mod encrypted_forest {
     // Cleanup
     // -----------------------------------------------------------------------
 
-    /// Close game-related accounts after the game has ended to reclaim rent.
     pub fn cleanup_game(ctx: Context<CleanupGame>, _game_id: u64) -> Result<()> {
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
         require!(clock.slot > game.end_slot, ErrorCode::GameNotEnded);
-        // Account closing is handled by Anchor's close constraint
         Ok(())
     }
 
@@ -856,142 +894,10 @@ pub mod encrypted_forest {
         require!(clock.slot > game.end_slot, ErrorCode::GameNotEnded);
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Queue create_planet_key computation
-    // -----------------------------------------------------------------------
-
-    /// Queue an Arcium computation to create a planet encryption key.
-    pub fn queue_create_planet_key(
-        ctx: Context<QueueCreatePlanetKey>,
-        computation_offset: u64,
-        ciphertext_x: [u8; 32],
-        ciphertext_y: [u8; 32],
-        ciphertext_game_id: [u8; 32],
-        pubkey: [u8; 32],
-        nonce: u128,
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-
-        let args = ArgBuilder::new()
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(nonce)
-            .encrypted_u64(ciphertext_x)
-            .encrypted_u64(ciphertext_y)
-            .encrypted_u64(ciphertext_game_id)
-            .build();
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            None,
-            vec![CreatePlanetKeyCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[],
-            )?],
-            1,
-            0,
-        )?;
-
-        Ok(())
-    }
-
-    /// Callback for create_planet_key.
-    #[arcium_callback(encrypted_ix = "create_planet_key")]
-    pub fn create_planet_key_callback(
-        ctx: Context<CreatePlanetKeyCallback>,
-        output: SignedComputationOutputs<CreatePlanetKeyOutput>,
-    ) -> Result<()> {
-        let o = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(CreatePlanetKeyOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
-        };
-
-        // Emit encrypted planet key result
-        emit!(PlanetKeyEvent {
-            encrypted_hash_0: o.ciphertexts[0],
-            encrypted_hash_1: o.ciphertexts[1],
-            encrypted_hash_2: o.ciphertexts[2],
-            encrypted_hash_3: o.ciphertexts[3],
-            encryption_key: o.encryption_key,
-            nonce: o.nonce.to_le_bytes(),
-        });
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Queue resolve_combat computation (for encrypted combat)
-    // -----------------------------------------------------------------------
-
-    /// Queue an Arcium computation to resolve combat.
-    pub fn queue_resolve_combat(
-        ctx: Context<QueueResolveCombat>,
-        computation_offset: u64,
-        ciphertext_attacker_ships: [u8; 32],
-        ciphertext_defender_ships: [u8; 32],
-        pubkey: [u8; 32],
-        nonce: u128,
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-
-        let args = ArgBuilder::new()
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(nonce)
-            .encrypted_u64(ciphertext_attacker_ships)
-            .encrypted_u64(ciphertext_defender_ships)
-            .build();
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            None,
-            vec![ResolveCombatCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[],
-            )?],
-            1,
-            0,
-        )?;
-
-        Ok(())
-    }
-
-    /// Callback for resolve_combat.
-    #[arcium_callback(encrypted_ix = "resolve_combat")]
-    pub fn resolve_combat_callback(
-        ctx: Context<ResolveCombatCallback>,
-        output: SignedComputationOutputs<ResolveCombatOutput>,
-    ) -> Result<()> {
-        let o = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(ResolveCombatOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
-        };
-
-        emit!(CombatResultEvent {
-            encrypted_attacker_remaining: o.ciphertexts[0],
-            encrypted_defender_remaining: o.ciphertexts[1],
-            encrypted_attacker_wins: o.ciphertexts[2],
-            encryption_key: o.encryption_key,
-            nonce: o.nonce.to_le_bytes(),
-        });
-
-        Ok(())
-    }
 }
 
 // ===========================================================================
-// Account Structures - State
+// Account Structures
 // ===========================================================================
 
 #[account]
@@ -1019,73 +925,57 @@ pub struct Player {
 }
 
 #[account]
-pub struct CelestialBody {
-    pub body_type: CelestialBodyType,
-    pub size: u8,
-    pub owner: Option<Pubkey>,
-    pub ship_count: u64,
-    pub max_ship_capacity: u64,
-    pub ship_gen_speed: u64,
-    pub metal_count: u64,
-    pub max_metal_capacity: u64,
-    pub metal_gen_speed: u64,
-    pub range: u64,
-    pub launch_velocity: u64,
-    pub level: u8,
-    pub comets: Vec<CometBoost>,
-    pub last_updated_slot: u64,
+pub struct EncryptedCelestialBody {
     pub planet_hash: [u8; 32],
+    pub last_updated_slot: u64,
+    pub last_flushed_slot: u64,
+    pub enc_pubkey: [u8; 32],
+    pub enc_nonce: [u8; 16],
+    pub enc_ciphertexts: [[u8; 32]; 19],
 }
 
-impl CelestialBody {
-    pub const MAX_SIZE: usize = 8  // discriminator
-        + 1   // body_type
-        + 1   // size
-        + 33  // owner (Option<Pubkey>)
-        + 8   // ship_count
-        + 8   // max_ship_capacity
-        + 8   // ship_gen_speed
-        + 8   // metal_count
-        + 8   // max_metal_capacity
-        + 8   // metal_gen_speed
-        + 8   // range
-        + 8   // launch_velocity
-        + 1   // level
-        + 4 + (MAX_COMETS * 1) // comets vec (4 byte len + max 2 entries)
-        + 8   // last_updated_slot
-        + 32; // planet_hash
+impl EncryptedCelestialBody {
+    pub const MAX_SIZE: usize = 8
+        + 32   // planet_hash
+        + 8    // last_updated_slot
+        + 8    // last_flushed_slot
+        + 32   // enc_pubkey
+        + 16   // enc_nonce
+        + (19 * 32); // enc_ciphertexts
 }
 
 #[account]
-pub struct PendingMoves {
+pub struct EncryptedPendingMoves {
     pub game_id: u64,
     pub planet_hash: [u8; 32],
-    pub moves: Vec<PendingMove>,
+    pub move_count: u8,
+    pub moves: Vec<EncryptedPendingMove>,
 }
 
-impl PendingMoves {
-    pub const MAX_SIZE: usize = 8  // discriminator
-        + 8   // game_id
-        + 32  // planet_hash
-        + 4 + (MAX_PENDING_MOVES * PendingMove::SIZE); // moves vec
+impl EncryptedPendingMoves {
+    pub const MAX_SIZE: usize = 8
+        + 8    // game_id
+        + 32   // planet_hash
+        + 1    // move_count
+        + 4 + (MAX_PENDING_MOVES * EncryptedPendingMove::SIZE);
 }
 
-// ===========================================================================
-// Supporting Structs & Enums
-// ===========================================================================
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct PendingMove {
-    pub source_planet_hash: [u8; 32],
-    pub ships_sent: u64,
-    pub metal_sent: u64,
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct EncryptedPendingMove {
+    pub active: bool,
     pub landing_slot: u64,
-    pub attacker: Pubkey,
+    pub enc_pubkey: [u8; 32],
+    pub enc_nonce: [u8; 16],
+    pub enc_ciphertexts: [[u8; 32]; 6],
 }
 
-impl PendingMove {
-    pub const SIZE: usize = 32 + 8 + 8 + 8 + 32;
+impl EncryptedPendingMove {
+    pub const SIZE: usize = 1 + 8 + 32 + 16 + (6 * 32);
 }
+
+// ===========================================================================
+// Enums
+// ===========================================================================
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
 pub enum CelestialBodyType {
@@ -1136,52 +1026,52 @@ pub struct NoiseThresholds {
 // ===========================================================================
 
 #[event]
-pub struct SpawnResultEvent {
+pub struct InitPlanetEvent {
+    pub encrypted_hash_0: [u8; 32],
+    pub encrypted_hash_1: [u8; 32],
+    pub encrypted_hash_2: [u8; 32],
+    pub encrypted_hash_3: [u8; 32],
     pub encrypted_valid: [u8; 32],
+    pub encryption_key: [u8; 32],
+    pub nonce: [u8; 16],
+}
+
+#[event]
+pub struct InitSpawnPlanetEvent {
     pub encrypted_hash_0: [u8; 32],
     pub encrypted_hash_1: [u8; 32],
     pub encrypted_hash_2: [u8; 32],
     pub encrypted_hash_3: [u8; 32],
+    pub encrypted_valid: [u8; 32],
+    pub encrypted_spawn_valid: [u8; 32],
     pub encryption_key: [u8; 32],
     pub nonce: [u8; 16],
 }
 
 #[event]
-pub struct PlanetKeyEvent {
-    pub encrypted_hash_0: [u8; 32],
-    pub encrypted_hash_1: [u8; 32],
-    pub encrypted_hash_2: [u8; 32],
-    pub encrypted_hash_3: [u8; 32],
+pub struct ProcessMoveEvent {
+    pub encrypted_landing_slot: [u8; 32],
+    pub encrypted_surviving_ships: [u8; 32],
+    pub encrypted_valid: [u8; 32],
     pub encryption_key: [u8; 32],
     pub nonce: [u8; 16],
 }
 
 #[event]
-pub struct CombatResultEvent {
-    pub encrypted_attacker_remaining: [u8; 32],
-    pub encrypted_defender_remaining: [u8; 32],
-    pub encrypted_attacker_wins: [u8; 32],
-    pub encryption_key: [u8; 32],
-    pub nonce: [u8; 16],
-}
-
-#[event]
-pub struct MoveEvent {
-    pub source_hash: [u8; 32],
-    pub target_hash: [u8; 32],
-    pub ships_sent: u64,
-    pub ships_arriving: u64,
-    pub metal_sent: u64,
-    pub landing_slot: u64,
-    pub player: Pubkey,
-}
-
-#[event]
-pub struct UpgradeEvent {
+pub struct FlushPlanetEvent {
     pub planet_hash: [u8; 32],
-    pub new_level: u8,
-    pub focus: UpgradeFocus,
-    pub player: Pubkey,
+    pub encrypted_success: [u8; 32],
+    pub encryption_key: [u8; 32],
+    pub nonce: [u8; 16],
+}
+
+#[event]
+pub struct UpgradePlanetEvent {
+    pub planet_hash: [u8; 32],
+    pub encrypted_success: [u8; 32],
+    pub encrypted_new_level: [u8; 32],
+    pub encryption_key: [u8; 32],
+    pub nonce: [u8; 16],
 }
 
 #[event]
@@ -1229,28 +1119,18 @@ pub enum ErrorCode {
     InvalidPlanetHash,
     #[msg("Coordinates are outside map bounds")]
     CoordinatesOutOfBounds,
-    #[msg("Coordinate is dead space")]
-    DeadSpace,
-    #[msg("Invalid spawn planet - must be Miniscule Planet")]
-    InvalidSpawnPlanet,
-    #[msg("Planet already has an owner")]
-    PlanetAlreadyOwned,
-    #[msg("You do not own this planet")]
-    NotPlanetOwner,
-    #[msg("Insufficient ships")]
-    InsufficientShips,
-    #[msg("Insufficient metal")]
-    InsufficientMetal,
-    #[msg("Must send at least one ship")]
-    MustSendShips,
-    #[msg("No ships would survive the journey")]
-    NoShipsSurviveDistance,
     #[msg("Too many pending moves on target planet")]
     TooManyPendingMoves,
-    #[msg("Only Planet type can be upgraded")]
-    CannotUpgradeNonPlanet,
-    #[msg("Invalid spawn coordinates")]
-    InvalidSpawnCoordinates,
+    #[msg("Invalid init planet result")]
+    InvalidInitPlanet,
+    #[msg("Invalid spawn validation")]
+    InvalidSpawnValidation,
+    #[msg("Invalid move input")]
+    InvalidMoveInput,
+    #[msg("Flush failed")]
+    FlushFailed,
+    #[msg("Upgrade failed")]
+    UpgradeFailed,
 }
 
 // ===========================================================================
@@ -1259,9 +1139,9 @@ pub enum ErrorCode {
 
 // --- Computation Definition Initializers ---
 
-#[init_computation_definition_accounts("create_planet_key", payer)]
+#[init_computation_definition_accounts("init_planet", payer)]
 #[derive(Accounts)]
-pub struct InitCreatePlanetKeyCompDef<'info> {
+pub struct InitInitPlanetCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -1273,9 +1153,9 @@ pub struct InitCreatePlanetKeyCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[init_computation_definition_accounts("verify_spawn_coordinates", payer)]
+#[init_computation_definition_accounts("init_spawn_planet", payer)]
 #[derive(Accounts)]
-pub struct InitVerifySpawnCompDef<'info> {
+pub struct InitInitSpawnPlanetCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -1287,9 +1167,37 @@ pub struct InitVerifySpawnCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[init_computation_definition_accounts("resolve_combat", payer)]
+#[init_computation_definition_accounts("process_move", payer)]
 #[derive(Accounts)]
-pub struct InitResolveCombatCompDef<'info> {
+pub struct InitProcessMoveCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("flush_planet", payer)]
+#[derive(Accounts)]
+pub struct InitFlushPlanetCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("upgrade_planet", payer)]
+#[derive(Accounts)]
+pub struct InitUpgradePlanetCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -1337,32 +1245,39 @@ pub struct InitPlayer<'info> {
         bump,
     )]
     pub player: Account<'info, Player>,
-    /// Optional server signer for whitelist games
     pub server: Option<Signer<'info>>,
     pub system_program: Program<'info, System>,
 }
 
-// --- Spawn (queues Arcium computation) ---
+// --- Queue Init Planet ---
 
-#[queue_computation_accounts("verify_spawn_coordinates", payer)]
+#[queue_computation_accounts("init_planet", payer)]
 #[derive(Accounts)]
-#[instruction(computation_offset: u64)]
-pub struct Spawn<'info> {
+#[instruction(computation_offset: u64, planet_hash: [u8; 32])]
+pub struct QueueInitPlanet<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(
-        seeds = [b"game", player.game_id.to_le_bytes().as_ref()],
+        seeds = [b"game", game.game_id.to_le_bytes().as_ref()],
         bump,
     )]
-    pub game: Account<'info, Game>,
+    pub game: Box<Account<'info, Game>>,
     #[account(
-        mut,
-        seeds = [b"player", player.game_id.to_le_bytes().as_ref(), player.owner.as_ref()],
+        init,
+        payer = payer,
+        space = EncryptedCelestialBody::MAX_SIZE,
+        seeds = [b"planet", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
-        constraint = player.owner == payer.key() @ ErrorCode::NotPlanetOwner,
     )]
-    pub player: Account<'info, Player>,
-    // Standard Arcium accounts
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
+    #[account(
+        init,
+        payer = payer,
+        space = EncryptedPendingMoves::MAX_SIZE,
+        seeds = [b"moves", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
+        bump,
+    )]
+    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -1373,7 +1288,7 @@ pub struct Spawn<'info> {
     )]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
     /// CHECK: mempool_account
     pub mempool_account: UncheckedAccount<'info>,
@@ -1383,154 +1298,325 @@ pub struct Spawn<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
     /// CHECK: computation_account
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_VERIFY_SPAWN_COORDINATES))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
+    pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Account<'info, FeePool>,
+    pub pool_account: Box<Account<'info, FeePool>>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Account<'info, ClockAccount>,
+    pub clock_account: Box<Account<'info, ClockAccount>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("verify_spawn_coordinates")]
+#[callback_accounts("init_planet")]
 #[derive(Accounts)]
-pub struct VerifySpawnCoordinatesCallback<'info> {
+pub struct InitPlanetCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_VERIFY_SPAWN_COORDINATES))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
     /// CHECK: computation_account
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
+    pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
     /// CHECK: instructions_sysvar
     pub instructions_sysvar: AccountInfo<'info>,
-    // Custom callback accounts
     #[account(mut)]
-    pub player: Account<'info, Player>,
-    pub game: Account<'info, Game>,
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
 }
 
-// --- Create Planet ---
+// --- Queue Init Spawn Planet ---
 
+#[queue_computation_accounts("init_spawn_planet", payer)]
 #[derive(Accounts)]
-#[instruction(game_id: u64, x: i64, y: i64, planet_hash: [u8; 32])]
-pub struct CreatePlanet<'info> {
+#[instruction(computation_offset: u64, planet_hash: [u8; 32])]
+pub struct QueueInitSpawnPlanet<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(
-        seeds = [b"game", game_id.to_le_bytes().as_ref()],
+        seeds = [b"game", game.game_id.to_le_bytes().as_ref()],
         bump,
     )]
-    pub game: Account<'info, Game>,
+    pub game: Box<Account<'info, Game>>,
+    #[account(
+        mut,
+        seeds = [b"player", game.game_id.to_le_bytes().as_ref(), payer.key().as_ref()],
+        bump,
+        constraint = player.owner == payer.key() @ ErrorCode::InvalidSpawnValidation,
+    )]
+    pub player: Box<Account<'info, Player>>,
     #[account(
         init,
         payer = payer,
-        space = CelestialBody::MAX_SIZE,
-        seeds = [b"planet", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
+        space = EncryptedCelestialBody::MAX_SIZE,
+        seeds = [b"planet", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
     )]
-    pub celestial_body: Account<'info, CelestialBody>,
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
     #[account(
         init,
         payer = payer,
-        space = PendingMoves::MAX_SIZE,
-        seeds = [b"moves", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
+        space = EncryptedPendingMoves::MAX_SIZE,
+        seeds = [b"moves", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
     )]
-    pub pending_moves: Account<'info, PendingMoves>,
+    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+    #[account(
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: mempool_account
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: executing_pool
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_SPAWN_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
     pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
 }
 
-// --- Claim Spawn Planet ---
-
+#[callback_accounts("init_spawn_planet")]
 #[derive(Accounts)]
-#[instruction(game_id: u64, planet_hash: [u8; 32])]
-pub struct ClaimSpawnPlanet<'info> {
-    pub owner: Signer<'info>,
-    #[account(
-        seeds = [b"game", game_id.to_le_bytes().as_ref()],
-        bump,
-    )]
-    pub game: Account<'info, Game>,
-    #[account(
-        seeds = [b"player", game_id.to_le_bytes().as_ref(), owner.key().as_ref()],
-        bump,
-        constraint = player.owner == owner.key() @ ErrorCode::NotPlanetOwner,
-    )]
-    pub player: Account<'info, Player>,
-    #[account(
-        mut,
-        seeds = [b"planet", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
-        bump,
-    )]
-    pub celestial_body: Account<'info, CelestialBody>,
+pub struct InitSpawnPlanetCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_SPAWN_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+    #[account(mut)]
+    pub player: Box<Account<'info, Player>>,
+    #[account(mut)]
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
 }
 
-// --- Move Ships ---
+// --- Queue Process Move ---
 
+#[queue_computation_accounts("process_move", payer)]
 #[derive(Accounts)]
-#[instruction(game_id: u64, source_hash: [u8; 32], target_hash: [u8; 32])]
-pub struct MoveShips<'info> {
-    pub player_owner: Signer<'info>,
+#[instruction(computation_offset: u64)]
+pub struct QueueProcessMove<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
     #[account(
-        seeds = [b"game", game_id.to_le_bytes().as_ref()],
+        seeds = [b"game", game.game_id.to_le_bytes().as_ref()],
         bump,
     )]
-    pub game: Account<'info, Game>,
+    pub game: Box<Account<'info, Game>>,
+    #[account(mut)]
+    pub source_body: Box<Account<'info, EncryptedCelestialBody>>,
+    #[account(mut)]
+    pub target_pending: Box<Account<'info, EncryptedPendingMoves>>,
     #[account(
-        mut,
-        seeds = [b"planet", game_id.to_le_bytes().as_ref(), source_hash.as_ref()],
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
         bump,
+        address = derive_sign_pda!(),
     )]
-    pub source_planet: Account<'info, CelestialBody>,
-    #[account(
-        mut,
-        seeds = [b"moves", game_id.to_le_bytes().as_ref(), source_hash.as_ref()],
-        bump,
-    )]
-    pub source_pending: Account<'info, PendingMoves>,
-    #[account(
-        seeds = [b"planet", game_id.to_le_bytes().as_ref(), target_hash.as_ref()],
-        bump,
-    )]
-    pub target_planet: Account<'info, CelestialBody>,
-    #[account(
-        mut,
-        seeds = [b"moves", game_id.to_le_bytes().as_ref(), target_hash.as_ref()],
-        bump,
-    )]
-    pub target_pending: Account<'info, PendingMoves>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: mempool_account
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: executing_pool
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PROCESS_MOVE))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
 }
 
-// --- Upgrade ---
-
+#[callback_accounts("process_move")]
 #[derive(Accounts)]
-#[instruction(game_id: u64, planet_hash: [u8; 32])]
-pub struct Upgrade<'info> {
-    pub player_owner: Signer<'info>,
+pub struct ProcessMoveCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PROCESS_MOVE))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+    #[account(mut)]
+    pub source_body: Box<Account<'info, EncryptedCelestialBody>>,
+    #[account(mut)]
+    pub target_pending: Box<Account<'info, EncryptedPendingMoves>>,
+}
+
+// --- Queue Flush Planet ---
+
+#[queue_computation_accounts("flush_planet", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct QueueFlushPlanet<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut)]
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
+    #[account(mut)]
+    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
     #[account(
-        seeds = [b"game", game_id.to_le_bytes().as_ref()],
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: mempool_account
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: executing_pool
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_FLUSH_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("flush_planet")]
+#[derive(Accounts)]
+pub struct FlushPlanetCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_FLUSH_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+    #[account(mut)]
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
+    #[account(mut)]
+    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+}
+
+// --- Queue Upgrade Planet ---
+
+#[queue_computation_accounts("upgrade_planet", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct QueueUpgradePlanet<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        seeds = [b"game", game.game_id.to_le_bytes().as_ref()],
         bump,
     )]
-    pub game: Account<'info, Game>,
+    pub game: Box<Account<'info, Game>>,
+    #[account(mut)]
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
     #[account(
-        mut,
-        seeds = [b"planet", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
         bump,
+        address = derive_sign_pda!(),
     )]
-    pub celestial_body: Account<'info, CelestialBody>,
-    #[account(
-        mut,
-        seeds = [b"moves", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
-        bump,
-    )]
-    pub pending_moves: Account<'info, PendingMoves>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: mempool_account
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: executing_pool
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_UPGRADE_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("upgrade_planet")]
+#[derive(Accounts)]
+pub struct UpgradePlanetCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_UPGRADE_PLANET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    /// CHECK: computation_account
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+    #[account(mut)]
+    pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
 }
 
 // --- Broadcast ---
@@ -1597,126 +1683,12 @@ pub struct CleanupPlanet<'info> {
         bump,
         close = closer,
     )]
-    pub celestial_body: Account<'info, CelestialBody>,
+    pub celestial_body: Account<'info, EncryptedCelestialBody>,
     #[account(
         mut,
         seeds = [b"moves", game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
         close = closer,
     )]
-    pub pending_moves: Account<'info, PendingMoves>,
-}
-
-// --- Queue Create Planet Key ---
-
-#[queue_computation_accounts("create_planet_key", payer)]
-#[derive(Accounts)]
-#[instruction(computation_offset: u64)]
-pub struct QueueCreatePlanetKey<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(
-        init_if_needed,
-        space = 9,
-        payer = payer,
-        seeds = [&SIGN_PDA_SEED],
-        bump,
-        address = derive_sign_pda!(),
-    )]
-    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: mempool_account
-    pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: executing_pool
-    pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: computation_account
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CREATE_PLANET_KEY))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Account<'info, FeePool>,
-    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Account<'info, ClockAccount>,
-    pub system_program: Program<'info, System>,
-    pub arcium_program: Program<'info, Arcium>,
-}
-
-#[callback_accounts("create_planet_key")]
-#[derive(Accounts)]
-pub struct CreatePlanetKeyCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CREATE_PLANET_KEY))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
-    /// CHECK: instructions_sysvar
-    pub instructions_sysvar: AccountInfo<'info>,
-}
-
-// --- Queue Resolve Combat ---
-
-#[queue_computation_accounts("resolve_combat", payer)]
-#[derive(Accounts)]
-#[instruction(computation_offset: u64)]
-pub struct QueueResolveCombat<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(
-        init_if_needed,
-        space = 9,
-        payer = payer,
-        seeds = [&SIGN_PDA_SEED],
-        bump,
-        address = derive_sign_pda!(),
-    )]
-    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: mempool_account
-    pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: executing_pool
-    pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
-    /// CHECK: computation_account
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_RESOLVE_COMBAT))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Account<'info, FeePool>,
-    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Account<'info, ClockAccount>,
-    pub system_program: Program<'info, System>,
-    pub arcium_program: Program<'info, Arcium>,
-}
-
-#[callback_accounts("resolve_combat")]
-#[derive(Accounts)]
-pub struct ResolveCombatCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_RESOLVE_COMBAT))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
-    /// CHECK: instructions_sysvar
-    pub instructions_sysvar: AccountInfo<'info>,
+    pub pending_moves: Account<'info, EncryptedPendingMoves>,
 }

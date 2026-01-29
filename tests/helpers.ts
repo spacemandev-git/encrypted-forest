@@ -1,13 +1,23 @@
 /**
  * Shared test utilities for Encrypted Forest integration tests.
  *
+ * Updated for the new encrypted architecture where all mutations go through
+ * Arcium MPC circuits:
+ *   queue_init_planet / init_planet_callback
+ *   queue_init_spawn_planet / init_spawn_planet_callback
+ *   queue_process_move / process_move_callback
+ *   queue_flush_planet / flush_planet_callback
+ *   queue_upgrade_planet / upgrade_planet_callback
+ *
  * Provides helper functions for:
  * - blake3-based planet hash computation (matching on-chain logic)
- * - Hash-noise body determination (matching on-chain `determine_celestial_body`)
- * - PDA derivation for Game, Player, CelestialBody, PendingMoves
+ * - Hash-noise body determination (matching on-chain determine_celestial_body)
+ * - PDA derivation for Game, Player, EncryptedCelestialBody, EncryptedPendingMoves
  * - Brute-force spawn planet finder
  * - Game + player setup shortcuts
  * - Arcium computation infrastructure helpers
+ * - Encryption helpers for building ciphertext payloads
+ * - Queue instruction wrappers for all 5 MPC operations
  */
 
 import * as anchor from "@coral-xyz/anchor";
@@ -28,6 +38,7 @@ import {
   getMempoolAccAddress,
   getExecutingPoolAccAddress,
   getMXEPublicKey,
+  getArciumProgramId,
   RescueCipher,
   x25519,
   deserializeLE,
@@ -64,6 +75,11 @@ export enum CometBoost {
   LaunchVelocity = 5,
 }
 
+export enum UpgradeFocus {
+  Range = 0,
+  LaunchVelocity = 1,
+}
+
 export interface NoiseThresholds {
   deadSpaceThreshold: number;
   planetThreshold: number;
@@ -98,12 +114,12 @@ export interface BaseStats {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_THRESHOLDS: NoiseThresholds = {
-  deadSpaceThreshold: 128, // ~50% dead space
-  planetThreshold: 128, // ~50% of bodies are planets
-  quasarThreshold: 192, // ~25% quasars
-  spacetimeRipThreshold: 224, // ~12% spacetime rips
-  asteroidBeltThreshold: 255, // remainder are asteroid belts
-  sizeThreshold1: 43, // ~17% miniscule
+  deadSpaceThreshold: 128,
+  planetThreshold: 128,
+  quasarThreshold: 192,
+  spacetimeRipThreshold: 224,
+  asteroidBeltThreshold: 255,
+  sizeThreshold1: 43,
   sizeThreshold2: 86,
   sizeThreshold3: 128,
   sizeThreshold4: 171,
@@ -117,12 +133,6 @@ export const DEFAULT_MAP_DIAMETER = new BN(1000);
 // blake3 hash (matching on-chain compute_planet_hash)
 // ---------------------------------------------------------------------------
 
-/**
- * Compute the planet hash from coordinates and game_id using blake3.
- * Must match the on-chain `compute_planet_hash(x: i64, y: i64, game_id: u64)`.
- *
- * Layout: x as i64 LE (8 bytes) || y as i64 LE (8 bytes) || game_id as u64 LE (8 bytes)
- */
 export function computePlanetHash(
   x: bigint,
   y: bigint,
@@ -130,7 +140,7 @@ export function computePlanetHash(
 ): Uint8Array {
   const buf = new ArrayBuffer(24);
   const view = new DataView(buf);
-  view.setBigInt64(0, x, true); // little-endian signed
+  view.setBigInt64(0, x, true);
   view.setBigInt64(8, y, true);
   view.setBigUint64(16, gameId, true);
   return blake3(new Uint8Array(buf));
@@ -158,11 +168,6 @@ function cometFromByte(b: number): CometBoost {
   }
 }
 
-/**
- * Determine celestial body properties from a planet hash and noise thresholds.
- * Returns null if the hash represents dead space.
- * Matches on-chain `determine_celestial_body` exactly.
- */
 export function determineCelestialBody(
   hash: Uint8Array,
   thresholds: NoiseThresholds
@@ -174,12 +179,10 @@ export function determineCelestialBody(
   const byte4 = hash[4];
   const byte5 = hash[5];
 
-  // Byte 0: dead space check
   if (byte0 < thresholds.deadSpaceThreshold) {
     return null;
   }
 
-  // Byte 1: body type
   let bodyType: CelestialBodyType;
   if (byte1 < thresholds.planetThreshold) {
     bodyType = CelestialBodyType.Planet;
@@ -191,7 +194,6 @@ export function determineCelestialBody(
     bodyType = CelestialBodyType.AsteroidBelt;
   }
 
-  // Byte 2: size (1-6)
   let size: number;
   if (byte2 < thresholds.sizeThreshold1) {
     size = 1;
@@ -207,7 +209,6 @@ export function determineCelestialBody(
     size = 6;
   }
 
-  // Byte 3: comets
   let numComets: number;
   if (byte3 <= 216) {
     numComets = 0;
@@ -223,7 +224,6 @@ export function determineCelestialBody(
   }
   if (numComets >= 2) {
     let second = cometFromByte(byte5);
-    // Ensure second comet boosts a different stat
     if (second === comets[0]) {
       second = cometFromByte((byte5 + 1) & 0xff);
     }
@@ -233,10 +233,6 @@ export function determineCelestialBody(
   return { bodyType, size, comets };
 }
 
-/**
- * Compute base stats for a celestial body given its type and size.
- * Matches on-chain `base_stats`.
- */
 export function baseStats(
   bodyType: CelestialBodyType,
   size: number
@@ -288,9 +284,6 @@ export function baseStats(
   }
 }
 
-/**
- * Apply comet boosts to stats. Each comet doubles one stat.
- */
 export function applyCometBoosts(
   stats: BaseStats,
   comets: CometBoost[]
@@ -325,10 +318,6 @@ export function applyCometBoosts(
 // Distance / decay / landing helpers (matching on-chain logic)
 // ---------------------------------------------------------------------------
 
-/**
- * Compute distance between two 2D points using the on-chain formula.
- * max(dx, dy) + min(dx, dy) / 2  (integer division)
- */
 export function computeDistance(
   x1: bigint,
   y1: bigint,
@@ -342,9 +331,6 @@ export function computeDistance(
   return maxD + minD / 2n;
 }
 
-/**
- * Ships remaining after distance decay: ships - (distance / range).
- */
 export function applyDistanceDecay(
   ships: bigint,
   distance: bigint,
@@ -356,9 +342,6 @@ export function applyDistanceDecay(
   return remaining > 0n ? remaining : 0n;
 }
 
-/**
- * Compute landing slot: current_slot + distance * game_speed / launch_velocity.
- */
 export function computeLandingSlot(
   currentSlot: bigint,
   distance: bigint,
@@ -370,9 +353,6 @@ export function computeLandingSlot(
   return currentSlot + travelTime;
 }
 
-/**
- * Upgrade cost: 100 * 2^level
- */
 export function upgradeCost(currentLevel: number): bigint {
   return 100n * (1n << BigInt(currentLevel));
 }
@@ -443,12 +423,6 @@ export interface SpawnCoordinate {
   props: CelestialBodyProperties;
 }
 
-/**
- * Brute-force search for valid spawn coordinates.
- * A valid spawn planet is a Miniscule (size 1) Planet-type celestial body.
- *
- * Scans coordinates starting from (startX, startY) in a spiral pattern.
- */
 export function findSpawnPlanet(
   gameId: bigint,
   thresholds: NoiseThresholds,
@@ -458,7 +432,6 @@ export function findSpawnPlanet(
   const half = Math.floor(mapDiameter / 2);
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    // Simple sequential scan -- good enough for tests
     const x = BigInt((attempt % mapDiameter) - half);
     const y = BigInt(Math.floor(attempt / mapDiameter) - half);
 
@@ -482,9 +455,6 @@ export function findSpawnPlanet(
   );
 }
 
-/**
- * Find a planet of a specific type and minimum size.
- */
 export function findPlanetOfType(
   gameId: bigint,
   thresholds: NoiseThresholds,
@@ -496,7 +466,11 @@ export function findPlanetOfType(
 ): SpawnCoordinate {
   const half = Math.floor(mapDiameter / 2);
 
-  for (let attempt = startOffset; attempt < startOffset + maxAttempts; attempt++) {
+  for (
+    let attempt = startOffset;
+    attempt < startOffset + maxAttempts;
+    attempt++
+  ) {
     const x = BigInt((attempt % mapDiameter) - half);
     const y = BigInt(Math.floor(attempt / mapDiameter) - half);
 
@@ -506,7 +480,11 @@ export function findPlanetOfType(
     const hash = computePlanetHash(x, y, gameId);
     const props = determineCelestialBody(hash, thresholds);
 
-    if (props !== null && props.bodyType === bodyType && props.size >= minSize) {
+    if (
+      props !== null &&
+      props.bodyType === bodyType &&
+      props.size >= minSize
+    ) {
       return { x, y, hash, props };
     }
   }
@@ -516,9 +494,6 @@ export function findPlanetOfType(
   );
 }
 
-/**
- * Find coordinates that are dead space (no celestial body).
- */
 export function findDeadSpace(
   gameId: bigint,
   thresholds: NoiseThresholds,
@@ -556,18 +531,12 @@ export function getProviderAndProgram(): {
   return { provider, program };
 }
 
-/**
- * Read a keypair from a JSON file (Solana CLI format).
- */
 export function readKpJson(path: string): Keypair {
   const fs = require("fs");
   const raw = JSON.parse(fs.readFileSync(path, "utf-8"));
   return Keypair.fromSecretKey(Uint8Array.from(raw));
 }
 
-/**
- * Airdrop SOL to a keypair (local validator only).
- */
 export async function airdrop(
   provider: AnchorProvider,
   pubkey: PublicKey,
@@ -605,7 +574,7 @@ export function defaultGameConfig(
     mapDiameter: DEFAULT_MAP_DIAMETER,
     gameSpeed: DEFAULT_GAME_SPEED,
     startSlot: new BN(0),
-    endSlot: new BN(1_000_000_000), // very far future
+    endSlot: new BN(1_000_000_000),
     winCondition: { pointsBurning: { pointsPerMetal: new BN(1) } },
     whitelist: false,
     serverPubkey: null,
@@ -614,9 +583,6 @@ export function defaultGameConfig(
   };
 }
 
-/**
- * Create a game, returning the game PDA.
- */
 export async function createGame(
   program: Program<EncryptedForest>,
   admin: Keypair,
@@ -660,9 +626,6 @@ export async function createGame(
   return gamePDA;
 }
 
-/**
- * Initialize a player for a game.
- */
 export async function initPlayer(
   program: Program<EncryptedForest>,
   owner: Keypair,
@@ -696,169 +659,6 @@ export async function initPlayer(
     .rpc({ commitment: "confirmed" });
 
   return playerPDA;
-}
-
-/**
- * Create planet on-chain (plaintext coordinates, after hash is known).
- */
-export async function createPlanetOnChain(
-  program: Program<EncryptedForest>,
-  payer: Keypair,
-  gameId: bigint,
-  x: bigint,
-  y: bigint,
-  planetHash: Uint8Array
-): Promise<{ planetPDA: PublicKey; pendingMovesPDA: PublicKey }> {
-  const [gamePDA] = deriveGamePDA(gameId, program.programId);
-  const [planetPDA] = derivePlanetPDA(gameId, planetHash, program.programId);
-  const [pendingMovesPDA] = derivePendingMovesPDA(
-    gameId,
-    planetHash,
-    program.programId
-  );
-
-  await program.methods
-    .createPlanet(
-      new BN(gameId.toString()),
-      new BN(x.toString()),
-      new BN(y.toString()),
-      Array.from(planetHash) as any
-    )
-    .accounts({
-      payer: payer.publicKey,
-      game: gamePDA,
-      celestialBody: planetPDA,
-      pendingMoves: pendingMovesPDA,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([payer])
-    .rpc({ commitment: "confirmed" });
-
-  return { planetPDA, pendingMovesPDA };
-}
-
-/**
- * Claim a spawn planet for a player.
- */
-export async function claimSpawnPlanet(
-  program: Program<EncryptedForest>,
-  owner: Keypair,
-  gameId: bigint,
-  planetHash: Uint8Array
-): Promise<void> {
-  const [gamePDA] = deriveGamePDA(gameId, program.programId);
-  const [playerPDA] = derivePlayerPDA(
-    gameId,
-    owner.publicKey,
-    program.programId
-  );
-  const [planetPDA] = derivePlanetPDA(gameId, planetHash, program.programId);
-
-  await program.methods
-    .claimSpawnPlanet(
-      new BN(gameId.toString()),
-      Array.from(planetHash) as any
-    )
-    .accounts({
-      owner: owner.publicKey,
-      game: gamePDA,
-      player: playerPDA,
-      celestialBody: planetPDA,
-    })
-    .signers([owner])
-    .rpc({ commitment: "confirmed" });
-}
-
-/**
- * Full setup: create game + init player + find spawn planet + create planet + claim it.
- * Returns all relevant PDAs and coordinates.
- */
-export async function fullSpawnSetup(
-  program: Program<EncryptedForest>,
-  provider: AnchorProvider,
-  admin: Keypair,
-  player: Keypair,
-  gameId: bigint,
-  configOverrides?: Partial<GameConfig>
-): Promise<{
-  gamePDA: PublicKey;
-  playerPDA: PublicKey;
-  planetPDA: PublicKey;
-  pendingMovesPDA: PublicKey;
-  spawn: SpawnCoordinate;
-  config: GameConfig;
-}> {
-  const config = defaultGameConfig(gameId, configOverrides);
-  const gamePDA = await createGame(program, admin, config);
-  const playerPDA = await initPlayer(program, player, gameId);
-
-  const spawn = findSpawnPlanet(gameId, config.noiseThresholds);
-  const { planetPDA, pendingMovesPDA } = await createPlanetOnChain(
-    program,
-    player,
-    gameId,
-    spawn.x,
-    spawn.y,
-    spawn.hash
-  );
-
-  // For tests that do not use Arcium, we need to manually mark the player as spawned.
-  // Since the spawn instruction requires Arcium MPC, we use claimSpawnPlanet after
-  // marking has_spawned. In real flow, the Arcium callback does this.
-  // For non-Arcium tests we will skip the spawn instruction and just create+claim.
-  // NOTE: claim_spawn_planet requires player.has_spawned == true, which is set by
-  // the Arcium callback. For pure on-chain tests without Arcium, we need a workaround.
-  // We will test claimSpawnPlanet separately where has_spawned can be set.
-
-  return { gamePDA, playerPDA, planetPDA, pendingMovesPDA, spawn, config };
-}
-
-/**
- * Helper to create a second planet (non-spawn) for movement tests.
- * Finds any celestial body and creates it on chain.
- */
-export async function createSecondPlanet(
-  program: Program<EncryptedForest>,
-  payer: Keypair,
-  gameId: bigint,
-  thresholds: NoiseThresholds,
-  bodyType?: CelestialBodyType,
-  startOffset: number = 50_000
-): Promise<{
-  x: bigint;
-  y: bigint;
-  hash: Uint8Array;
-  props: CelestialBodyProperties;
-  planetPDA: PublicKey;
-  pendingMovesPDA: PublicKey;
-}> {
-  const coord = findPlanetOfType(
-    gameId,
-    thresholds,
-    bodyType ?? CelestialBodyType.Planet,
-    2, // min size 2 so it has native ships
-    1000,
-    100_000,
-    startOffset
-  );
-
-  const { planetPDA, pendingMovesPDA } = await createPlanetOnChain(
-    program,
-    payer,
-    gameId,
-    coord.x,
-    coord.y,
-    coord.hash
-  );
-
-  return {
-    x: coord.x,
-    y: coord.y,
-    hash: coord.hash,
-    props: coord.props,
-    planetPDA,
-    pendingMovesPDA,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -898,65 +698,615 @@ export async function getMXEPublicKeyWithRetry(
 }
 
 /**
- * Initialize all computation definitions for the program.
+ * Derive the Arcium sign PDA for this program.
  */
+export function getSignPdaAddress(programId: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("ArciumSignerAccount")],
+    programId
+  )[0];
+}
+
+/**
+ * Initialize all 5 computation definitions for the program.
+ */
+/**
+ * Circuit base URL for offchain comp def storage (Cloudflare R2).
+ * Must be set via CIRCUIT_BASE_URL env var.
+ */
+export const DEFAULT_CIRCUIT_BASE_URL = process.env.CIRCUIT_BASE_URL;
+if (!DEFAULT_CIRCUIT_BASE_URL) {
+  throw new Error("CIRCUIT_BASE_URL env var is required (e.g. https://<account>.r2.cloudflarestorage.com/<bucket>)");
+}
+
 export async function initAllCompDefs(
   program: Program<EncryptedForest>,
-  payer: Keypair
+  payer: Keypair,
+  circuitBaseUrl: string = DEFAULT_CIRCUIT_BASE_URL
 ): Promise<void> {
   const mxeAccount = getMXEAccAddress(program.programId);
+  const arciumProgram = getArciumProgramId();
 
-  // Init create_planet_key comp def
-  const cpkOffset = Buffer.from(
-    getCompDefAccOffset("create_planet_key")
-  ).readUInt32LE();
-  const cpkCompDef = getCompDefAccAddress(program.programId, cpkOffset);
+  const compDefNames = [
+    "init_planet",
+    "init_spawn_planet",
+    "process_move",
+    "flush_planet",
+    "upgrade_planet",
+  ];
 
-  await program.methods
-    .initCompDefCreatePlanetKey()
-    .accounts({
-      payer: payer.publicKey,
-      mxeAccount,
-      compDefAccount: cpkCompDef,
-    })
-    .signers([payer])
-    .rpc({ commitment: "confirmed" });
+  const methodNames = [
+    "initCompDefInitPlanet",
+    "initCompDefInitSpawnPlanet",
+    "initCompDefProcessMove",
+    "initCompDefFlushPlanet",
+    "initCompDefUpgradePlanet",
+  ] as const;
 
-  // Init verify_spawn_coordinates comp def
-  const vsOffset = Buffer.from(
-    getCompDefAccOffset("verify_spawn_coordinates")
-  ).readUInt32LE();
-  const vsCompDef = getCompDefAccAddress(program.programId, vsOffset);
+  for (let i = 0; i < compDefNames.length; i++) {
+    const offsetBytes = getCompDefAccOffset(compDefNames[i]);
+    const offsetU32 = Buffer.from(offsetBytes).readUInt32LE();
+    const compDefAddress = getCompDefAccAddress(program.programId, offsetU32);
 
-  await program.methods
-    .initCompDefVerifySpawn()
-    .accounts({
-      payer: payer.publicKey,
-      mxeAccount,
-      compDefAccount: vsCompDef,
-    })
-    .signers([payer])
-    .rpc({ commitment: "confirmed" });
-
-  // Init resolve_combat comp def
-  const rcOffset = Buffer.from(
-    getCompDefAccOffset("resolve_combat")
-  ).readUInt32LE();
-  const rcCompDef = getCompDefAccAddress(program.programId, rcOffset);
-
-  await program.methods
-    .initCompDefResolveCombat()
-    .accounts({
-      payer: payer.publicKey,
-      mxeAccount,
-      compDefAccount: rcCompDef,
-    })
-    .signers([payer])
-    .rpc({ commitment: "confirmed" });
+    try {
+      await (program.methods as any)
+        [methodNames[i]](circuitBaseUrl)
+        .accounts({
+          payer: payer.publicKey,
+          mxeAccount,
+          compDefAccount: compDefAddress,
+          arciumProgram,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([payer])
+        .rpc({ commitment: "confirmed" });
+      console.log(`Initialized comp def: ${compDefNames[i]} (offchain: ${circuitBaseUrl}/${compDefNames[i]}.arcis)`);
+    } catch (e: any) {
+      console.log(
+        `Comp def ${compDefNames[i]} may already be initialized:`,
+        e.message?.substring(0, 100)
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Unique game ID generator (prevents PDA collisions between tests)
+// Encryption helpers for building ciphertext payloads
+// ---------------------------------------------------------------------------
+
+export interface EncryptionContext {
+  privateKey: Uint8Array;
+  publicKey: Uint8Array;
+  mxePublicKey: Uint8Array;
+  sharedSecret: Uint8Array;
+  cipher: RescueCipher;
+}
+
+/**
+ * Set up encryption context with the MXE.
+ */
+export async function setupEncryption(
+  provider: AnchorProvider,
+  programId: PublicKey
+): Promise<EncryptionContext> {
+  const privateKey = x25519.utils.randomSecretKey();
+  const publicKey = x25519.getPublicKey(privateKey);
+  const mxePublicKey = await getMXEPublicKeyWithRetry(provider, programId);
+  const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
+  const cipher = new RescueCipher(sharedSecret);
+  return { privateKey, publicKey, mxePublicKey, sharedSecret, cipher };
+}
+
+/**
+ * Encrypt values and pack into a single buffer.
+ * Each encrypted value is a [u8; 32] ciphertext element.
+ * Returns the packed buffer and the raw ciphertext array.
+ */
+export function encryptAndPack(
+  cipher: RescueCipher,
+  values: bigint[],
+  nonce: Uint8Array
+): { packed: Uint8Array; ciphertexts: Uint8Array[] } {
+  const ciphertexts = cipher.encrypt(values, nonce);
+  const packed = new Uint8Array(ciphertexts.length * 32);
+  for (let i = 0; i < ciphertexts.length; i++) {
+    packed.set(new Uint8Array(ciphertexts[i]), i * 32);
+  }
+  return { packed, ciphertexts };
+}
+
+/**
+ * Build init_planet ciphertexts (12 values):
+ * x(u64), y(u64), game_id(u64), dead_space(u8), planet(u8), quasar(u8),
+ * spacetime(u8), s1(u8), s2(u8), s3(u8), s4(u8), s5(u8)
+ */
+export function buildInitPlanetValues(
+  x: bigint,
+  y: bigint,
+  gameId: bigint,
+  thresholds: NoiseThresholds
+): bigint[] {
+  return [
+    BigInt.asUintN(64, x),
+    BigInt.asUintN(64, y),
+    gameId,
+    BigInt(thresholds.deadSpaceThreshold),
+    BigInt(thresholds.planetThreshold),
+    BigInt(thresholds.quasarThreshold),
+    BigInt(thresholds.spacetimeRipThreshold),
+    BigInt(thresholds.sizeThreshold1),
+    BigInt(thresholds.sizeThreshold2),
+    BigInt(thresholds.sizeThreshold3),
+    BigInt(thresholds.sizeThreshold4),
+    BigInt(thresholds.sizeThreshold5),
+  ];
+}
+
+/**
+ * Build init_spawn_planet ciphertexts (16 values):
+ * Same as init_planet (12) + player_key_0..3 (4 u64s)
+ */
+export function buildInitSpawnPlanetValues(
+  x: bigint,
+  y: bigint,
+  gameId: bigint,
+  thresholds: NoiseThresholds,
+  playerPubkey: PublicKey
+): bigint[] {
+  const keyParts = pubkeyToU64Parts(playerPubkey);
+  return [
+    ...buildInitPlanetValues(x, y, gameId, thresholds),
+    ...keyParts,
+  ];
+}
+
+/**
+ * Build process_move ciphertexts (13 values):
+ * player_key_0..3 (u64 x4), ships_to_send (u64), metal_to_send (u64),
+ * source_x (u64), source_y (u64), target_x (u64), target_y (u64),
+ * current_slot (u64), game_speed (u64), last_updated_slot (u64)
+ */
+export function buildProcessMoveValues(
+  playerPubkey: PublicKey,
+  shipsToSend: bigint,
+  metalToSend: bigint,
+  sourceX: bigint,
+  sourceY: bigint,
+  targetX: bigint,
+  targetY: bigint,
+  currentSlot: bigint,
+  gameSpeed: bigint,
+  lastUpdatedSlot: bigint
+): bigint[] {
+  const keyParts = pubkeyToU64Parts(playerPubkey);
+  return [
+    ...keyParts,
+    shipsToSend,
+    metalToSend,
+    BigInt.asUintN(64, sourceX),
+    BigInt.asUintN(64, sourceY),
+    BigInt.asUintN(64, targetX),
+    BigInt.asUintN(64, targetY),
+    currentSlot,
+    gameSpeed,
+    lastUpdatedSlot,
+  ];
+}
+
+/**
+ * Build flush_planet ciphertexts (10 values):
+ * current_slot (u64), game_speed (u64), last_updated_slot (u64),
+ * move_ships (u64), move_metal (u64),
+ * move_attacker_0..3 (u64 x4), move_has_landed (u8)
+ */
+export function buildFlushPlanetValues(
+  currentSlot: bigint,
+  gameSpeed: bigint,
+  lastUpdatedSlot: bigint,
+  moveShips: bigint,
+  moveMetal: bigint,
+  attackerPubkey: PublicKey,
+  moveHasLanded: boolean
+): bigint[] {
+  const keyParts = pubkeyToU64Parts(attackerPubkey);
+  return [
+    currentSlot,
+    gameSpeed,
+    lastUpdatedSlot,
+    moveShips,
+    moveMetal,
+    ...keyParts,
+    BigInt(moveHasLanded ? 1 : 0),
+  ];
+}
+
+/**
+ * Build upgrade_planet ciphertexts (8 values):
+ * player_key_0..3 (u64 x4), focus (u8),
+ * current_slot (u64), game_speed (u64), last_updated_slot (u64)
+ */
+export function buildUpgradePlanetValues(
+  playerPubkey: PublicKey,
+  focus: UpgradeFocus,
+  currentSlot: bigint,
+  gameSpeed: bigint,
+  lastUpdatedSlot: bigint
+): bigint[] {
+  const keyParts = pubkeyToU64Parts(playerPubkey);
+  return [
+    ...keyParts,
+    BigInt(focus),
+    currentSlot,
+    gameSpeed,
+    lastUpdatedSlot,
+  ];
+}
+
+/**
+ * Convert a PublicKey to 4 u64 parts (little-endian).
+ */
+export function pubkeyToU64Parts(pubkey: PublicKey): bigint[] {
+  const keyBytes = pubkey.toBytes();
+  const keyView = new DataView(
+    keyBytes.buffer,
+    keyBytes.byteOffset,
+    keyBytes.byteLength
+  );
+  return [
+    keyView.getBigUint64(0, true),
+    keyView.getBigUint64(8, true),
+    keyView.getBigUint64(16, true),
+    keyView.getBigUint64(24, true),
+  ];
+}
+
+/**
+ * Read the encrypted planet state ciphertexts from an on-chain account
+ * and return the packed buffer + encryption metadata.
+ */
+export function packEncryptedState(
+  encPubkey: number[],
+  encNonce: number[],
+  encCiphertexts: number[][]
+): {
+  stateCts: Uint8Array;
+  statePubkey: Uint8Array;
+  stateNonce: bigint;
+} {
+  const statePubkey = new Uint8Array(encPubkey);
+  const nonceBytes = new Uint8Array(encNonce);
+  const nonceView = new DataView(
+    nonceBytes.buffer,
+    nonceBytes.byteOffset,
+    nonceBytes.byteLength
+  );
+  const nonceLow = nonceView.getBigUint64(0, true);
+  const nonceHigh = nonceView.getBigUint64(8, true);
+  const stateNonce = nonceLow | (nonceHigh << 64n);
+
+  const stateCts = new Uint8Array(19 * 32);
+  for (let i = 0; i < 19; i++) {
+    stateCts.set(new Uint8Array(encCiphertexts[i]), i * 32);
+  }
+
+  return { stateCts, statePubkey, stateNonce };
+}
+
+// ---------------------------------------------------------------------------
+// Queue instruction helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Get all Arcium account addresses needed for queue_* instructions.
+ */
+export function getArciumAccountAddresses(
+  program: Program<EncryptedForest>,
+  computationOffset: BN,
+  compDefName: string
+): Record<string, PublicKey> {
+  const arciumEnv = getArciumEnv();
+  const clusterOffset = arciumEnv.arciumClusterOffset;
+  const offsetBytes = getCompDefAccOffset(compDefName);
+  const offsetU32 = Buffer.from(offsetBytes).readUInt32LE();
+
+  return {
+    signPdaAccount: getSignPdaAddress(program.programId),
+    mxeAccount: getMXEAccAddress(program.programId),
+    mempoolAccount: getMempoolAccAddress(clusterOffset),
+    executingPool: getExecutingPoolAccAddress(clusterOffset),
+    computationAccount: getComputationAccAddress(
+      clusterOffset,
+      computationOffset
+    ),
+    compDefAccount: getCompDefAccAddress(program.programId, offsetU32),
+    clusterAccount: getClusterAccAddress(clusterOffset),
+    poolAccount: getPoolAccountAddress(),
+    clockAccount: getClockAccountAddress(),
+    arciumProgram: getArciumProgramId(),
+    systemProgram: SystemProgram.programId,
+  };
+}
+
+function getPoolAccountAddress(): PublicKey {
+  try {
+    const { getFeePoolAccAddress } = require("@arcium-hq/client");
+    return getFeePoolAccAddress();
+  } catch {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("FeePool")],
+      getArciumProgramId()
+    )[0];
+  }
+}
+
+function getClockAccountAddress(): PublicKey {
+  try {
+    const { getClockAccAddress } = require("@arcium-hq/client");
+    return getClockAccAddress();
+  } catch {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("ClockAccount")],
+      getArciumProgramId()
+    )[0];
+  }
+}
+
+/**
+ * Queue init_planet MPC computation.
+ */
+export async function queueInitPlanet(
+  program: Program<EncryptedForest>,
+  payer: Keypair,
+  gameId: bigint,
+  x: bigint,
+  y: bigint,
+  thresholds: NoiseThresholds,
+  encCtx: EncryptionContext
+): Promise<{ computationOffset: BN; planetPDA: PublicKey; pendingMovesPDA: PublicKey }> {
+  const planetHash = computePlanetHash(x, y, gameId);
+  const [gamePDA] = deriveGamePDA(gameId, program.programId);
+  const [planetPDA] = derivePlanetPDA(gameId, planetHash, program.programId);
+  const [pendingMovesPDA] = derivePendingMovesPDA(gameId, planetHash, program.programId);
+
+  const nonce = randomBytes(16);
+  const nonceValue = deserializeLE(nonce);
+  const values = buildInitPlanetValues(x, y, gameId, thresholds);
+  const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
+
+  const computationOffset = new BN(randomBytes(8), "hex");
+  const arciumAccts = getArciumAccountAddresses(program, computationOffset, "init_planet");
+
+  // Observer pubkey -- use a random key for the observer encryption
+  const observerKey = x25519.utils.randomSecretKey();
+  const observerPubkey = x25519.getPublicKey(observerKey);
+
+  await program.methods
+    .queueInitPlanet(
+      computationOffset,
+      Array.from(planetHash) as any,
+      Buffer.from(packed) as any,
+      Array.from(encCtx.publicKey) as any,
+      new BN(nonceValue.toString()),
+      Array.from(observerPubkey) as any
+    )
+    .accountsPartial({
+      payer: payer.publicKey,
+      game: gamePDA,
+      celestialBody: planetPDA,
+      pendingMoves: pendingMovesPDA,
+      ...arciumAccts,
+    })
+    .signers([payer])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  return { computationOffset, planetPDA, pendingMovesPDA };
+}
+
+/**
+ * Queue init_spawn_planet MPC computation.
+ */
+export async function queueInitSpawnPlanet(
+  program: Program<EncryptedForest>,
+  payer: Keypair,
+  gameId: bigint,
+  x: bigint,
+  y: bigint,
+  thresholds: NoiseThresholds,
+  encCtx: EncryptionContext
+): Promise<{ computationOffset: BN; planetPDA: PublicKey; pendingMovesPDA: PublicKey; playerPDA: PublicKey }> {
+  const planetHash = computePlanetHash(x, y, gameId);
+  const [gamePDA] = deriveGamePDA(gameId, program.programId);
+  const [playerPDA] = derivePlayerPDA(gameId, payer.publicKey, program.programId);
+  const [planetPDA] = derivePlanetPDA(gameId, planetHash, program.programId);
+  const [pendingMovesPDA] = derivePendingMovesPDA(gameId, planetHash, program.programId);
+
+  const nonce = randomBytes(16);
+  const nonceValue = deserializeLE(nonce);
+  const values = buildInitSpawnPlanetValues(x, y, gameId, thresholds, payer.publicKey);
+  const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
+
+  const computationOffset = new BN(randomBytes(8), "hex");
+  const arciumAccts = getArciumAccountAddresses(program, computationOffset, "init_spawn_planet");
+
+  const observerKey = x25519.utils.randomSecretKey();
+  const observerPubkey = x25519.getPublicKey(observerKey);
+
+  await program.methods
+    .queueInitSpawnPlanet(
+      computationOffset,
+      Array.from(planetHash) as any,
+      Buffer.from(packed) as any,
+      Array.from(encCtx.publicKey) as any,
+      new BN(nonceValue.toString()),
+      Array.from(observerPubkey) as any
+    )
+    .accountsPartial({
+      payer: payer.publicKey,
+      game: gamePDA,
+      player: playerPDA,
+      celestialBody: planetPDA,
+      pendingMoves: pendingMovesPDA,
+      ...arciumAccts,
+    })
+    .signers([payer])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  return { computationOffset, planetPDA, pendingMovesPDA, playerPDA };
+}
+
+/**
+ * Queue process_move MPC computation.
+ */
+export async function queueProcessMove(
+  program: Program<EncryptedForest>,
+  payer: Keypair,
+  gameId: bigint,
+  sourceBody: PublicKey,
+  targetPending: PublicKey,
+  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
+  moveValues: bigint[],
+  encCtx: EncryptionContext
+): Promise<{ computationOffset: BN }> {
+  const [gamePDA] = deriveGamePDA(gameId, program.programId);
+  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
+    stateData.encPubkey,
+    stateData.encNonce,
+    stateData.encCiphertexts
+  );
+
+  const moveNonce = randomBytes(16);
+  const moveNonceValue = deserializeLE(moveNonce);
+  const { packed: movePacked } = encryptAndPack(encCtx.cipher, moveValues, moveNonce);
+
+  const computationOffset = new BN(randomBytes(8), "hex");
+  const arciumAccts = getArciumAccountAddresses(program, computationOffset, "process_move");
+
+  const observerKey = x25519.utils.randomSecretKey();
+  const observerPubkey = x25519.getPublicKey(observerKey);
+
+  await program.methods
+    .queueProcessMove(
+      computationOffset,
+      Buffer.from(stateCts) as any,
+      Array.from(statePubkey) as any,
+      new BN(stateNonce.toString()),
+      Buffer.from(movePacked) as any,
+      Array.from(encCtx.publicKey) as any,
+      new BN(moveNonceValue.toString()),
+      Array.from(observerPubkey) as any
+    )
+    .accountsPartial({
+      payer: payer.publicKey,
+      game: gamePDA,
+      sourceBody,
+      targetPending,
+      ...arciumAccts,
+    })
+    .signers([payer])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  return { computationOffset };
+}
+
+/**
+ * Queue flush_planet MPC computation.
+ */
+export async function queueFlushPlanet(
+  program: Program<EncryptedForest>,
+  payer: Keypair,
+  celestialBody: PublicKey,
+  pendingMoves: PublicKey,
+  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
+  flushValues: bigint[],
+  moveIndex: number,
+  encCtx: EncryptionContext
+): Promise<{ computationOffset: BN }> {
+  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
+    stateData.encPubkey,
+    stateData.encNonce,
+    stateData.encCiphertexts
+  );
+
+  const flushNonce = randomBytes(16);
+  const flushNonceValue = deserializeLE(flushNonce);
+  const { packed: flushPacked } = encryptAndPack(encCtx.cipher, flushValues, flushNonce);
+
+  const computationOffset = new BN(randomBytes(8), "hex");
+  const arciumAccts = getArciumAccountAddresses(program, computationOffset, "flush_planet");
+
+  await program.methods
+    .queueFlushPlanet(
+      computationOffset,
+      moveIndex,
+      Buffer.from(stateCts) as any,
+      Array.from(statePubkey) as any,
+      new BN(stateNonce.toString()),
+      Buffer.from(flushPacked) as any,
+      Array.from(encCtx.publicKey) as any,
+      new BN(flushNonceValue.toString())
+    )
+    .accountsPartial({
+      payer: payer.publicKey,
+      celestialBody,
+      pendingMoves,
+      ...arciumAccts,
+    })
+    .signers([payer])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  return { computationOffset };
+}
+
+/**
+ * Queue upgrade_planet MPC computation.
+ */
+export async function queueUpgradePlanet(
+  program: Program<EncryptedForest>,
+  payer: Keypair,
+  gameId: bigint,
+  celestialBody: PublicKey,
+  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
+  upgradeValues: bigint[],
+  encCtx: EncryptionContext
+): Promise<{ computationOffset: BN }> {
+  const [gamePDA] = deriveGamePDA(gameId, program.programId);
+  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
+    stateData.encPubkey,
+    stateData.encNonce,
+    stateData.encCiphertexts
+  );
+
+  const upgradeNonce = randomBytes(16);
+  const upgradeNonceValue = deserializeLE(upgradeNonce);
+  const { packed: upgradePacked } = encryptAndPack(encCtx.cipher, upgradeValues, upgradeNonce);
+
+  const computationOffset = new BN(randomBytes(8), "hex");
+  const arciumAccts = getArciumAccountAddresses(program, computationOffset, "upgrade_planet");
+
+  await program.methods
+    .queueUpgradePlanet(
+      computationOffset,
+      Buffer.from(stateCts) as any,
+      Array.from(statePubkey) as any,
+      new BN(stateNonce.toString()),
+      Buffer.from(upgradePacked) as any,
+      Array.from(encCtx.publicKey) as any,
+      new BN(upgradeNonceValue.toString())
+    )
+    .accountsPartial({
+      payer: payer.publicKey,
+      game: gamePDA,
+      celestialBody,
+      ...arciumAccts,
+    })
+    .signers([payer])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  return { computationOffset };
+}
+
+// ---------------------------------------------------------------------------
+// Unique game ID generator
 // ---------------------------------------------------------------------------
 
 let gameIdCounter = BigInt(Date.now());
@@ -964,3 +1314,21 @@ let gameIdCounter = BigInt(Date.now());
 export function nextGameId(): bigint {
   return gameIdCounter++;
 }
+
+// ---------------------------------------------------------------------------
+// Re-exports from @arcium-hq/client for convenience
+// ---------------------------------------------------------------------------
+export {
+  getArciumEnv,
+  getMXEAccAddress,
+  getCompDefAccAddress,
+  getCompDefAccOffset,
+  getClusterAccAddress,
+  getComputationAccAddress,
+  getMempoolAccAddress,
+  getExecutingPoolAccAddress,
+  RescueCipher,
+  x25519,
+  deserializeLE,
+  awaitComputationFinalization,
+};
