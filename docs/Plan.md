@@ -1,5 +1,30 @@
 # Encrypted Forest - Implementation Plan
 
+## Progress Tracker
+
+| Phase | Component | Status | Notes |
+|-------|-----------|--------|-------|
+| 1A | Project Scaffolding | DONE | `arcium init` complete, Anchor.toml → Surfpool |
+| 1A | Surfpool Scripts | DONE | dev-start.sh, dev-stop.sh, deploy-local.sh |
+| 1A | Docker Compose | DONE | Postgres + 2 ARX nodes, connects to Surfpool |
+| 1A | Makefile + package.json | DONE | Bun workspaces, make targets |
+| 1A | .gitignore | DONE | Covers build artifacts, secrets, SQLite |
+| 1B | Account Structures | DONE | Game, Player, CelestialBody, PendingMoves (1722 lines) |
+| 1C | Arcis Circuits | DONE | create_planet_key, verify_spawn, resolve_combat (174 lines) |
+| 1D | Program Instructions | DONE | 12 instructions + 3 callbacks + flush helper |
+| 1E | Hash-Based Noise | DONE | blake3 hash → body type/size/comets via byte ranges |
+| 1F | Integration Tests | DONE | 8 test files, 3469 lines total, all compile |
+| 2 | Docker Environment | DONE | docker-compose.yml + ARX node configs |
+| 3 | Core SDK | DONE | 25 files, 41 tests passing, 0 TS errors |
+| 4 | Client SDK + App | DONE | sdk/client (10 files) + client scaffold (10 files), Svelte 5 runes |
+
+### Design Decisions Made
+- **Hash-based noise** instead of perlin (user choice) — blake3 hash bytes determine body type/size/comets
+- **Encryption**: Arcium MXE returns encrypted data, logged via standard Solana emit!()
+- **Surfpool**: Configured as local validator at localhost:8899
+
+---
+
 ## Architecture Overview
 
 ```

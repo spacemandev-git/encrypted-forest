@@ -1,1 +1,32 @@
 .DS_Store
+
+# Build artifacts
+target/
+.anchor/
+dist/
+*.so
+
+# Dependencies
+node_modules/
+
+# Database files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Environment and secrets
+.env
+.env.local
+arx-keys/node-*/node-keypair.json
+arx-keys/node-*/callback-kp.json
+arx-keys/node-*/identity.pem
+arx-keys/node-*/bls-keypair.json
+arx-keys/node-*/x25519-keypair.json
+
+# Dev environment runtime
+.pids/
+logs/
+
+# IDL (generated)
+target/idl/
+target/types/

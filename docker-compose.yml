@@ -1,0 +1,122 @@
+# docker-compose.yml - Encrypted Forest local dev environment
+#
+# Services:
+#   - postgres: Database for Arcium callback server
+#   - arx-node-1, arx-node-2: Arcium ARX MPC nodes (localnet requires 2)
+#
+# NOTE: Surfpool runs natively (no Docker image available).
+#       Start it with: ./scripts/dev-start.sh
+#       This compose file provides the ARX node infrastructure that connects
+#       to Surfpool's RPC at host.docker.internal:8899.
+#
+# Usage:
+#   docker compose up -d       # Start ARX nodes + Postgres
+#   docker compose down        # Stop everything
+#   docker compose down -v     # Stop and remove volumes
+#
+# Prerequisites:
+#   - Install Arcium tooling: arcup install
+#   - Generate node keypairs (see Arcium node-setup guide)
+#   - Surfpool must be running on host port 8899
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - Required by Arcium callback server / ARX nodes
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ef-postgres
+    environment:
+      POSTGRES_USER: arcium
+      POSTGRES_PASSWORD: arcium_dev
+      POSTGRES_DB: arcium_callback
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arcium -d arcium_callback"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # ARX Node 1
+  # ---------------------------------------------------------------------------
+  arx-node-1:
+    image: arcium/arx-node
+    container_name: ef-arx-node-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
+      NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
+      X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
+      ARX_METRICS_HOST: "0.0.0.0"
+      ARX_METRICS_PORT: "9091"
+    volumes:
+      - ./arx-keys/node-1/node-config.toml:/usr/arx-node/arx/node_config.toml:ro
+      - ./arx-keys/node-1/node-keypair.json:/usr/arx-node/node-keys/node_keypair.json:ro
+      - ./arx-keys/node-1/callback-kp.json:/usr/arx-node/node-keys/callback_authority_keypair.json:ro
+      - ./arx-keys/node-1/identity.pem:/usr/arx-node/node-keys/node_identity.pem:ro
+      - ./arx-keys/node-1/bls-keypair.json:/usr/arx-node/node-keys/bls_keypair.json:ro
+      - ./arx-keys/node-1/x25519-keypair.json:/usr/arx-node/node-keys/x25519_keypair.json:ro
+      - arx1-logs:/usr/arx-node/logs
+      - arx1-shares:/usr/arx-node/private-shares
+      - arx1-inputs:/usr/arx-node/public-inputs
+    ports:
+      - "8001:8001"
+      - "8002:8002"
+      - "8012:8012"
+      - "8013:8013"
+      - "9091:9091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ---------------------------------------------------------------------------
+  # ARX Node 2
+  # ---------------------------------------------------------------------------
+  arx-node-2:
+    image: arcium/arx-node
+    container_name: ef-arx-node-2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
+      NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
+      X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
+      ARX_METRICS_HOST: "0.0.0.0"
+      ARX_METRICS_PORT: "9092"
+    volumes:
+      - ./arx-keys/node-2/node-config.toml:/usr/arx-node/arx/node_config.toml:ro
+      - ./arx-keys/node-2/node-keypair.json:/usr/arx-node/node-keys/node_keypair.json:ro
+      - ./arx-keys/node-2/callback-kp.json:/usr/arx-node/node-keys/callback_authority_keypair.json:ro
+      - ./arx-keys/node-2/identity.pem:/usr/arx-node/node-keys/node_identity.pem:ro
+      - ./arx-keys/node-2/bls-keypair.json:/usr/arx-node/node-keys/bls_keypair.json:ro
+      - ./arx-keys/node-2/x25519-keypair.json:/usr/arx-node/node-keys/x25519_keypair.json:ro
+      - arx2-logs:/usr/arx-node/logs
+      - arx2-shares:/usr/arx-node/private-shares
+      - arx2-inputs:/usr/arx-node/public-inputs
+    ports:
+      - "8003:8001"
+      - "8004:8002"
+      - "8014:8012"
+      - "8015:8013"
+      - "9092:9091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  pgdata:
+  arx1-logs:
+  arx1-shares:
+  arx1-inputs:
+  arx2-logs:
+  arx2-shares:
+  arx2-inputs:
