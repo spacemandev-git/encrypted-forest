@@ -29,14 +29,19 @@ import {
 export function computePlanetHash(
   x: bigint,
   y: bigint,
-  gameId: bigint
+  gameId: bigint,
+  rounds: number = 1
 ): Uint8Array {
   const buf = new ArrayBuffer(24);
   const view = new DataView(buf);
   view.setBigInt64(0, x, true); // little-endian signed i64
   view.setBigInt64(8, y, true); // little-endian signed i64
   view.setBigUint64(16, gameId, true); // little-endian unsigned u64
-  return blake3(new Uint8Array(buf));
+  let hash = blake3(new Uint8Array(buf));
+  for (let r = 1; r < rounds; r++) {
+    hash = blake3(hash);
+  }
+  return hash;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,9 +366,10 @@ export function scanCoordinate(
   x: bigint,
   y: bigint,
   gameId: bigint,
-  thresholds: NoiseThresholds
+  thresholds: NoiseThresholds,
+  rounds: number = 1
 ): ScannedCoordinate {
-  const hash = computePlanetHash(x, y, gameId);
+  const hash = computePlanetHash(x, y, gameId, rounds);
   const properties = determineCelestialBody(hash, thresholds);
   return { x, y, hash, properties };
 }
@@ -378,12 +384,13 @@ export function scanRange(
   endX: bigint,
   endY: bigint,
   gameId: bigint,
-  thresholds: NoiseThresholds
+  thresholds: NoiseThresholds,
+  rounds: number = 1
 ): ScannedCoordinate[] {
   const results: ScannedCoordinate[] = [];
   for (let y = startY; y <= endY; y++) {
     for (let x = startX; x <= endX; x++) {
-      const scanned = scanCoordinate(x, y, gameId, thresholds);
+      const scanned = scanCoordinate(x, y, gameId, thresholds, rounds);
       if (scanned.properties !== null) {
         results.push(scanned);
       }
@@ -400,7 +407,8 @@ export function findSpawnPlanet(
   gameId: bigint,
   thresholds: NoiseThresholds,
   mapDiameter: number = 1000,
-  maxAttempts: number = 100_000
+  maxAttempts: number = 100_000,
+  rounds: number = 1
 ): ScannedCoordinate {
   const half = Math.floor(mapDiameter / 2);
 
@@ -411,7 +419,7 @@ export function findSpawnPlanet(
     if (x < -BigInt(half) || x > BigInt(half)) continue;
     if (y < -BigInt(half) || y > BigInt(half)) continue;
 
-    const hash = computePlanetHash(x, y, gameId);
+    const hash = computePlanetHash(x, y, gameId, rounds);
     const properties = determineCelestialBody(hash, thresholds);
 
     if (
@@ -438,7 +446,8 @@ export function findPlanetOfType(
   minSize: number = 1,
   mapDiameter: number = 1000,
   maxAttempts: number = 100_000,
-  startOffset: number = 0
+  startOffset: number = 0,
+  rounds: number = 1
 ): ScannedCoordinate {
   const half = Math.floor(mapDiameter / 2);
 
@@ -453,7 +462,7 @@ export function findPlanetOfType(
     if (x < -BigInt(half) || x > BigInt(half)) continue;
     if (y < -BigInt(half) || y > BigInt(half)) continue;
 
-    const hash = computePlanetHash(x, y, gameId);
+    const hash = computePlanetHash(x, y, gameId, rounds);
     const properties = determineCelestialBody(hash, thresholds);
 
     if (

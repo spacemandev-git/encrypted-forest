@@ -2,19 +2,10 @@
  * Instruction builder: queue_init_spawn_planet
  *
  * Queues an Arcium init_spawn_planet computation to initialize a planet
- * and claim it as the player's spawn point. Creates the
- * EncryptedCelestialBody and EncryptedPendingMoves accounts, and marks
- * the player as spawned on callback.
+ * and claim it as the player's spawn point.
  *
- * Ciphertexts (16 * 32 bytes packed):
- *   0: x (u64), 1: y (u64), 2: game_id (u64),
- *   3: dead_space_threshold (u8), 4: planet_threshold (u8),
- *   5: quasar_threshold (u8), 6: spacetime_rip_threshold (u8),
- *   7: size_threshold_1 (u8), 8: size_threshold_2 (u8),
- *   9: size_threshold_3 (u8), 10: size_threshold_4 (u8),
- *   11: size_threshold_5 (u8),
- *   12: player_key_0 (u64), 13: player_key_1 (u64),
- *   14: player_key_2 (u64), 15: player_key_3 (u64)
+ * Encrypted input: Enc<Shared, SpawnInput> = 4 ciphertexts (x, y, player_id, source_planet_id)
+ * Plaintext params from Game account are passed by the on-chain program.
  */
 
 import { type Program, BN } from "@coral-xyz/anchor";
@@ -31,9 +22,9 @@ export interface QueueInitSpawnPlanetArgs {
   gameId: bigint;
   computationOffset: bigint;
   planetHash: Uint8Array;
-  /** 16 ciphertexts packed as a single Vec<u8> (16 * 32 = 512 bytes) */
+  /** 4 ciphertexts packed as Vec<u8> (4 * 32 = 128 bytes): x, y, player_id, source_planet_id */
   ciphertexts: Uint8Array;
-  /** x25519 public key for encryption */
+  /** x25519 public key for Enc<Shared, SpawnInput> */
   pubkey: Uint8Array;
   /** Nonce for encryption (u128) */
   nonce: bigint;

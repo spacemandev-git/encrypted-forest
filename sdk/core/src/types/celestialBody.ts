@@ -90,25 +90,30 @@ export interface CelestialBodyStats {
  * Raw on-chain EncryptedCelestialBody account.
  * Matches the Rust `EncryptedCelestialBody` struct.
  *
+ * Has TWO separate encryption sections:
+ *   Static  (12 fields): body_type, size, max_ship_capacity, ship_gen_speed,
+ *           max_metal_capacity, metal_gen_speed, range, launch_velocity,
+ *           level, comet_count, comet_0, comet_1
+ *   Dynamic (4 fields):  ship_count, metal_count, owner_exists, owner_id
+ *
  * PDA: ["planet", game_id.to_le_bytes(), planet_hash]
  */
 export interface EncryptedCelestialBodyAccount {
   planetHash: Uint8Array; // [u8; 32]
   lastUpdatedSlot: bigint;
   lastFlushedSlot: bigint;
-  encPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
-  encNonce: Uint8Array; // [u8; 16] -- Rescue cipher nonce
-  encCiphertexts: Uint8Array[]; // 19 x [u8; 32]
+  // Static encryption section (12 ciphertexts)
+  staticEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
+  staticEncNonce: Uint8Array; // [u8; 16]
+  staticEncCiphertexts: Uint8Array[]; // 12 x [u8; 32]
+  // Dynamic encryption section (4 ciphertexts)
+  dynamicEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
+  dynamicEncNonce: Uint8Array; // [u8; 16]
+  dynamicEncCiphertexts: Uint8Array[]; // 4 x [u8; 32]
 }
 
-/**
- * Raw on-chain EncryptedPendingMove struct.
- * Matches the Rust `EncryptedPendingMove` struct.
- */
-export interface EncryptedPendingMoveAccount {
-  active: boolean;
-  landingSlot: bigint;
-  encPubkey: Uint8Array; // [u8; 32]
-  encNonce: Uint8Array; // [u8; 16]
-  encCiphertexts: Uint8Array[]; // 6 x [u8; 32]
-}
+/** Number of static encrypted fields (PlanetStatic). */
+export const PLANET_STATIC_FIELDS = 12;
+
+/** Number of dynamic encrypted fields (PlanetDynamic). */
+export const PLANET_DYNAMIC_FIELDS = 4;

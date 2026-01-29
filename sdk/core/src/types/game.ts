@@ -56,6 +56,8 @@ export interface Game {
   whitelist: boolean;
   serverPubkey: PublicKey | null;
   noiseThresholds: NoiseThresholds;
+  /** Iterated BLAKE3 rounds for planet hash difficulty. Default: 100. */
+  hashRounds: number;
 }
 
 /**
@@ -73,3 +75,5 @@ export const DEFAULT_THRESHOLDS: NoiseThresholds = {
   sizeThreshold4: 171,
   sizeThreshold5: 214,
 };
+
+export const DEFAULT_HASH_ROUNDS = 100;

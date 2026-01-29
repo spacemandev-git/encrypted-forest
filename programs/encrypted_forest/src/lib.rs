@@ -17,19 +17,61 @@ declare_id!("4R4Pxo65rnESAbndivR76UXP9ahX7WxczsZDWcryaM3c");
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MAX_PENDING_MOVES: usize = 16;
-const PLANET_STATE_FIELDS: usize = 19;
-const _PENDING_MOVE_DATA_FIELDS: usize = 6;
+const MAX_FLUSH_BATCH: usize = 8;
+const PLANET_STATIC_FIELDS: usize = 12;
+const PLANET_DYNAMIC_FIELDS: usize = 4;
+const PENDING_MOVE_DATA_FIELDS: usize = 4;
+
+// Base size for PendingMovesMetadata:
+// discriminator(8) + game_id(8) + planet_hash(32) + next_move_id(8) + move_count(2) +
+// queued_count(1) + queued_landing_slots(8 * 8 = 64) + vec_prefix(4)
+const PENDING_MOVES_META_BASE_SIZE: usize = 8 + 8 + 32 + 8 + 2 + 1 + 64 + 4;
+// Each PendingMoveEntry: landing_slot(8) + move_id(8)
+const PENDING_MOVE_ENTRY_SIZE: usize = 16;
+// Max queued callbacks (matches MAX_FLUSH_BATCH)
+const MAX_QUEUED_CALLBACKS: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Account byte offsets for ArgBuilder .account() reads
+// MPC nodes read encrypted data directly from on-chain accounts at these offsets.
+// ---------------------------------------------------------------------------
+
+// EncryptedCelestialBody layout (after 8-byte Anchor discriminator):
+//   planet_hash[32] + last_updated_slot(8) + last_flushed_slot(8) = 48 bytes
+//   --- Static Section (432 bytes) ---
+//   static_enc_pubkey[32] starts at discriminator(8) + 48 = offset 56
+//   static_enc_nonce[16] at offset 88
+//   static_enc_ciphertexts[12*32] at offset 104
+//   --- Dynamic Section (176 bytes) ---
+//   dynamic_enc_pubkey[32] starts at offset 56 + 432 = 488
+//   dynamic_enc_nonce[16] at offset 520
+//   dynamic_enc_ciphertexts[4*32] at offset 536
+const CELESTIAL_BODY_STATIC_OFFSET: u32 = 56;               // 8 + 32 + 8 + 8
+const ENC_PLANET_STATIC_SIZE: u32 = 32 + 16 + (12 * 32);   // = 432
+const CELESTIAL_BODY_DYNAMIC_OFFSET: u32 = 56 + 432;        // = 488
+const ENC_PLANET_DYNAMIC_SIZE: u32 = 32 + 16 + (4 * 32);   // = 176
+
+// PendingMoveAccount layout (after 8-byte discriminator):
+//   game_id(8) + planet_hash(32) + move_id(8) + landing_slot(8) + payer(32) = 88 bytes
+//   enc_nonce(16) starts at offset 96
+//   enc_ciphertexts[4*32] at offset 112
+// For Enc<Mxe, PendingMoveData>: nonce(16) + ciphertexts(128) = 144 bytes
+const MOVE_ACCOUNT_ENC_OFFSET: u32 = 96;
+const ENC_MOVE_DATA_SIZE: u32 = 144; // 16 + (4 * 32)
 
 // ---------------------------------------------------------------------------
 // Hash helper
 // ---------------------------------------------------------------------------
-pub fn compute_planet_hash(x: i64, y: i64, game_id: u64) -> [u8; 32] {
+pub fn compute_planet_hash(x: i64, y: i64, game_id: u64, hash_rounds: u16) -> [u8; 32] {
     let mut input = [0u8; 24];
     input[0..8].copy_from_slice(&x.to_le_bytes());
     input[8..16].copy_from_slice(&y.to_le_bytes());
     input[16..24].copy_from_slice(&game_id.to_le_bytes());
-    *blake3::hash(&input).as_bytes()
+    let mut hash = *blake3::hash(&input).as_bytes();
+    for _ in 1..hash_rounds {
+        hash = *blake3::hash(&hash).as_bytes();
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -40,44 +82,6 @@ fn extract_ct(data: &[u8], index: usize) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&data[start..start + 32]);
     out
-}
-
-// ---------------------------------------------------------------------------
-// Helper: build ArgBuilder for PlanetState (19 fields) from packed ciphertexts
-// ---------------------------------------------------------------------------
-fn append_planet_state_args(mut builder: ArgBuilder, cts: &[u8]) -> ArgBuilder {
-    // body_type(u8), size(u8), owner_exists(u8)
-    builder = builder
-        .encrypted_u8(extract_ct(cts, 0))
-        .encrypted_u8(extract_ct(cts, 1))
-        .encrypted_u8(extract_ct(cts, 2));
-    // owner_0..3(u64)
-    builder = builder
-        .encrypted_u64(extract_ct(cts, 3))
-        .encrypted_u64(extract_ct(cts, 4))
-        .encrypted_u64(extract_ct(cts, 5))
-        .encrypted_u64(extract_ct(cts, 6));
-    // ship_count, max_ship_capacity, ship_gen_speed
-    builder = builder
-        .encrypted_u64(extract_ct(cts, 7))
-        .encrypted_u64(extract_ct(cts, 8))
-        .encrypted_u64(extract_ct(cts, 9));
-    // metal_count, max_metal_capacity, metal_gen_speed
-    builder = builder
-        .encrypted_u64(extract_ct(cts, 10))
-        .encrypted_u64(extract_ct(cts, 11))
-        .encrypted_u64(extract_ct(cts, 12));
-    // range, launch_velocity
-    builder = builder
-        .encrypted_u64(extract_ct(cts, 13))
-        .encrypted_u64(extract_ct(cts, 14));
-    // level(u8), comet_count(u8), comet_0(u8), comet_1(u8)
-    builder = builder
-        .encrypted_u8(extract_ct(cts, 15))
-        .encrypted_u8(extract_ct(cts, 16))
-        .encrypted_u8(extract_ct(cts, 17))
-        .encrypted_u8(extract_ct(cts, 18));
-    builder
 }
 
 // ===========================================================================
@@ -187,10 +191,12 @@ pub mod encrypted_forest {
         whitelist: bool,
         server_pubkey: Option<Pubkey>,
         noise_thresholds: NoiseThresholds,
+        hash_rounds: u16,
     ) -> Result<()> {
         require!(map_diameter > 0, ErrorCode::InvalidMapDiameter);
         require!(game_speed > 0, ErrorCode::InvalidGameSpeed);
         require!(end_slot > start_slot, ErrorCode::InvalidTimeRange);
+        require!(hash_rounds >= 1, ErrorCode::InvalidHashRounds);
         if whitelist {
             require!(server_pubkey.is_some(), ErrorCode::WhitelistRequiresServer);
         }
@@ -206,6 +212,7 @@ pub mod encrypted_forest {
         game.whitelist = whitelist;
         game.server_pubkey = server_pubkey;
         game.noise_thresholds = noise_thresholds;
+        game.hash_rounds = hash_rounds;
 
         Ok(())
     }
@@ -237,20 +244,22 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue init_planet
-    // Packed params: ciphertexts = 12 * 32 bytes, pubkey = 32, nonce = 16, observer = 32
+    // Encrypted: CoordInput (x, y) = 2 * 32 bytes
+    // Plaintext: game_id + 9 thresholds sourced from Game account
+    // Output: (PlanetStatic, PlanetDynamic, InitPlanetRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_init_planet(
         ctx: Context<QueueInitPlanet>,
         computation_offset: u64,
         planet_hash: [u8; 32],
-        // All 12 ciphertexts packed: x, y, game_id, dead_space, planet, quasar, spacetime, s1-s5
+        // 2 ciphertexts: x, y (the fog-of-war secret)
         ciphertexts: Vec<u8>,
         pubkey: [u8; 32],
         nonce: u128,
         observer_pubkey: [u8; 32],
     ) -> Result<()> {
-        require!(ciphertexts.len() == 12 * 32, ErrorCode::InvalidInitPlanet);
+        require!(ciphertexts.len() == 2 * 32, ErrorCode::InvalidInitPlanet);
 
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
@@ -264,26 +273,35 @@ pub mod encrypted_forest {
         let pending = &mut ctx.accounts.pending_moves;
         pending.game_id = game.game_id;
         pending.planet_hash = planet_hash;
+        pending.next_move_id = 0;
         pending.move_count = 0;
+        pending.queued_count = 0;
+        pending.queued_landing_slots = [0u64; 8];
         pending.moves = Vec::new();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        let nt = &game.noise_thresholds;
         let args = ArgBuilder::new()
+            // Enc<Shared, CoordInput>: pubkey + nonce + 2 encrypted fields
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(extract_ct(&ciphertexts, 0))  // x
             .encrypted_u64(extract_ct(&ciphertexts, 1))  // y
-            .encrypted_u64(extract_ct(&ciphertexts, 2))  // game_id
-            .encrypted_u8(extract_ct(&ciphertexts, 3))   // dead_space
-            .encrypted_u8(extract_ct(&ciphertexts, 4))   // planet_thresh
-            .encrypted_u8(extract_ct(&ciphertexts, 5))   // quasar_thresh
-            .encrypted_u8(extract_ct(&ciphertexts, 6))   // spacetime_thresh
-            .encrypted_u8(extract_ct(&ciphertexts, 7))   // size_1
-            .encrypted_u8(extract_ct(&ciphertexts, 8))   // size_2
-            .encrypted_u8(extract_ct(&ciphertexts, 9))   // size_3
-            .encrypted_u8(extract_ct(&ciphertexts, 10))  // size_4
-            .encrypted_u8(extract_ct(&ciphertexts, 11))  // size_5
+            // Plaintext params from Game account
+            .plaintext_u64(game.game_id)
+            .plaintext_u64(nt.dead_space_threshold as u64)
+            .plaintext_u64(nt.planet_threshold as u64)
+            .plaintext_u64(nt.quasar_threshold as u64)
+            .plaintext_u64(nt.spacetime_rip_threshold as u64)
+            .plaintext_u64(nt.size_threshold_1 as u64)
+            .plaintext_u64(nt.size_threshold_2 as u64)
+            .plaintext_u64(nt.size_threshold_3 as u64)
+            .plaintext_u64(nt.size_threshold_4 as u64)
+            .plaintext_u64(nt.size_threshold_5 as u64)
+            // Planet key (same pubkey, separate Shared handle for PlanetDynamic)
+            .x25519_pubkey(pubkey)
+            // Observer
             .x25519_pubkey(observer_pubkey)
             .build();
 
@@ -322,25 +340,36 @@ pub mod encrypted_forest {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let enc_state = &o.field_0.field_0;
-        let revealed = &o.field_0.field_1;
+        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, InitPlanetRevealed>)
+        let enc_static = &o.field_0.field_0;
+        let enc_dynamic = &o.field_0.field_1;
+        let revealed = &o.field_0.field_2;
 
         let planet = &mut ctx.accounts.celestial_body;
-        planet.enc_pubkey = enc_state.encryption_key;
-        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+
+        // Write static section
+        planet.static_enc_pubkey = enc_static.encryption_key;
+        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATE_FIELDS {
-            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+        while i < PLANET_STATIC_FIELDS {
+            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
             i += 1;
         }
+
+        // Write dynamic section
+        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
+        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
+        let mut j = 0;
+        while j < PLANET_DYNAMIC_FIELDS {
+            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
+            j += 1;
+        }
+
         planet.last_updated_slot = Clock::get()?.slot;
 
         emit!(InitPlanetEvent {
-            encrypted_hash_0: revealed.ciphertexts[0],
-            encrypted_hash_1: revealed.ciphertexts[1],
-            encrypted_hash_2: revealed.ciphertexts[2],
-            encrypted_hash_3: revealed.ciphertexts[3],
-            encrypted_valid: revealed.ciphertexts[4],
+            encrypted_planet_hash: revealed.ciphertexts[0],
+            encrypted_valid: revealed.ciphertexts[1],
             encryption_key: revealed.encryption_key,
             nonce: revealed.nonce.to_le_bytes(),
         });
@@ -350,20 +379,22 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue init_spawn_planet
-    // Packed params: ciphertexts = 16 * 32 bytes
+    // Encrypted: SpawnInput (x, y, player_id, source_planet_id) = 4 * 32 bytes
+    // Plaintext: game_id + 9 thresholds sourced from Game account
+    // Output: (PlanetStatic, PlanetDynamic, SpawnPlanetRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_init_spawn_planet(
         ctx: Context<QueueInitSpawnPlanet>,
         computation_offset: u64,
         planet_hash: [u8; 32],
-        // 16 ciphertexts packed: x, y, game_id, 9 thresholds, 4 player_key parts
+        // 4 ciphertexts: x, y, player_id, source_planet_id
         ciphertexts: Vec<u8>,
         pubkey: [u8; 32],
         nonce: u128,
         observer_pubkey: [u8; 32],
     ) -> Result<()> {
-        require!(ciphertexts.len() == 16 * 32, ErrorCode::InvalidSpawnValidation);
+        require!(ciphertexts.len() == 4 * 32, ErrorCode::InvalidSpawnValidation);
 
         let player = &ctx.accounts.player;
         require!(!player.has_spawned, ErrorCode::AlreadySpawned);
@@ -381,30 +412,35 @@ pub mod encrypted_forest {
         let pending = &mut ctx.accounts.pending_moves;
         pending.game_id = game.game_id;
         pending.planet_hash = planet_hash;
+        pending.next_move_id = 0;
         pending.move_count = 0;
         pending.moves = Vec::new();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        let nt = &game.noise_thresholds;
         let args = ArgBuilder::new()
+            // Enc<Shared, SpawnInput>: pubkey + nonce + 4 encrypted fields
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(extract_ct(&ciphertexts, 0))   // x
             .encrypted_u64(extract_ct(&ciphertexts, 1))   // y
-            .encrypted_u64(extract_ct(&ciphertexts, 2))   // game_id
-            .encrypted_u8(extract_ct(&ciphertexts, 3))    // dead_space
-            .encrypted_u8(extract_ct(&ciphertexts, 4))    // planet
-            .encrypted_u8(extract_ct(&ciphertexts, 5))    // quasar
-            .encrypted_u8(extract_ct(&ciphertexts, 6))    // spacetime
-            .encrypted_u8(extract_ct(&ciphertexts, 7))    // s1
-            .encrypted_u8(extract_ct(&ciphertexts, 8))    // s2
-            .encrypted_u8(extract_ct(&ciphertexts, 9))    // s3
-            .encrypted_u8(extract_ct(&ciphertexts, 10))   // s4
-            .encrypted_u8(extract_ct(&ciphertexts, 11))   // s5
-            .encrypted_u64(extract_ct(&ciphertexts, 12))  // player_key_0
-            .encrypted_u64(extract_ct(&ciphertexts, 13))  // player_key_1
-            .encrypted_u64(extract_ct(&ciphertexts, 14))  // player_key_2
-            .encrypted_u64(extract_ct(&ciphertexts, 15))  // player_key_3
+            .encrypted_u64(extract_ct(&ciphertexts, 2))   // player_id
+            .encrypted_u64(extract_ct(&ciphertexts, 3))   // source_planet_id
+            // Plaintext params from Game account
+            .plaintext_u64(game.game_id)
+            .plaintext_u64(nt.dead_space_threshold as u64)
+            .plaintext_u64(nt.planet_threshold as u64)
+            .plaintext_u64(nt.quasar_threshold as u64)
+            .plaintext_u64(nt.spacetime_rip_threshold as u64)
+            .plaintext_u64(nt.size_threshold_1 as u64)
+            .plaintext_u64(nt.size_threshold_2 as u64)
+            .plaintext_u64(nt.size_threshold_3 as u64)
+            .plaintext_u64(nt.size_threshold_4 as u64)
+            .plaintext_u64(nt.size_threshold_5 as u64)
+            // Planet key (same pubkey, separate Shared handle for PlanetDynamic)
+            .x25519_pubkey(pubkey)
+            // Observer
             .x25519_pubkey(observer_pubkey)
             .build();
 
@@ -450,28 +486,39 @@ pub mod encrypted_forest {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let enc_state = &o.field_0.field_0;
-        let revealed = &o.field_0.field_1;
+        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, SpawnPlanetRevealed>)
+        let enc_static = &o.field_0.field_0;
+        let enc_dynamic = &o.field_0.field_1;
+        let revealed = &o.field_0.field_2;
 
         let planet = &mut ctx.accounts.celestial_body;
-        planet.enc_pubkey = enc_state.encryption_key;
-        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+
+        // Write static section
+        planet.static_enc_pubkey = enc_static.encryption_key;
+        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATE_FIELDS {
-            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+        while i < PLANET_STATIC_FIELDS {
+            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
             i += 1;
         }
+
+        // Write dynamic section
+        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
+        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
+        let mut j = 0;
+        while j < PLANET_DYNAMIC_FIELDS {
+            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
+            j += 1;
+        }
+
         planet.last_updated_slot = Clock::get()?.slot;
 
         ctx.accounts.player.has_spawned = true;
 
         emit!(InitSpawnPlanetEvent {
-            encrypted_hash_0: revealed.ciphertexts[0],
-            encrypted_hash_1: revealed.ciphertexts[1],
-            encrypted_hash_2: revealed.ciphertexts[2],
-            encrypted_hash_3: revealed.ciphertexts[3],
-            encrypted_valid: revealed.ciphertexts[4],
-            encrypted_spawn_valid: revealed.ciphertexts[5],
+            encrypted_planet_hash: revealed.ciphertexts[0],
+            encrypted_valid: revealed.ciphertexts[1],
+            encrypted_spawn_valid: revealed.ciphertexts[2],
             encryption_key: revealed.encryption_key,
             nonce: revealed.nonce.to_le_bytes(),
         });
@@ -481,58 +528,80 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue process_move
-    // state_cts = 19 * 32 bytes, move_cts = 13 * 32 bytes
+    // Planet state (static + dynamic) read via .account() from source_body.
+    // move_cts = 11 * 32 bytes.
+    // Output: (PlanetDynamic, PendingMoveData, MoveRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_process_move(
         ctx: Context<QueueProcessMove>,
         computation_offset: u64,
-        state_cts: Vec<u8>,       // 19 * 32 = 608 bytes
-        state_pubkey: [u8; 32],
-        state_nonce: u128,
-        move_cts: Vec<u8>,        // 13 * 32 = 416 bytes
+        landing_slot: u64,        // public: client-computed, MPC-validated
+        move_cts: Vec<u8>,        // 11 * 32 = 352 bytes
         move_pubkey: [u8; 32],
         move_nonce: u128,
         observer_pubkey: [u8; 32],
     ) -> Result<()> {
-        require!(state_cts.len() == 19 * 32, ErrorCode::InvalidMoveInput);
-        require!(move_cts.len() == 13 * 32, ErrorCode::InvalidMoveInput);
+        require!(move_cts.len() == 11 * 32, ErrorCode::InvalidMoveInput);
 
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
         require!(clock.slot >= game.start_slot, ErrorCode::GameNotStarted);
         require!(clock.slot < game.end_slot, ErrorCode::GameEnded);
 
+        // landing_slot must be in the future
+        require!(landing_slot > clock.slot, ErrorCode::InvalidMoveInput);
+
+        // Enforce: source planet must have all landed moves flushed
+        let source_pending = &ctx.accounts.source_pending;
+        if !source_pending.moves.is_empty() {
+            require!(
+                source_pending.moves[0].landing_slot > clock.slot,
+                ErrorCode::MustFlushFirst
+            );
+        }
+
+        // Push landing_slot into target's FIFO buffer for the callback
+        let target_pending = &mut ctx.accounts.target_pending;
         require!(
-            ctx.accounts.target_pending.moves.len() < MAX_PENDING_MOVES,
+            (target_pending.queued_count as usize) < MAX_QUEUED_CALLBACKS,
             ErrorCode::TooManyPendingMoves
         );
+        let qc = target_pending.queued_count as usize;
+        target_pending.queued_landing_slots[qc] = landing_slot;
+        target_pending.queued_count += 1;
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // First Enc<Shared, PlanetState>
+        // Enc<Shared, PlanetStatic> — read static section from source_body
+        // Enc<Shared, PlanetDynamic> — read dynamic section from source_body
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(state_pubkey)
-            .plaintext_u128(state_nonce);
-        builder = append_planet_state_args(builder, &state_cts);
+            .account(
+                ctx.accounts.source_body.key(),
+                CELESTIAL_BODY_STATIC_OFFSET,
+                ENC_PLANET_STATIC_SIZE,
+            )
+            .account(
+                ctx.accounts.source_body.key(),
+                CELESTIAL_BODY_DYNAMIC_OFFSET,
+                ENC_PLANET_DYNAMIC_SIZE,
+            );
 
-        // Second Enc<Shared, ProcessMoveInput>
+        // Enc<Shared, ProcessMoveInput> (11 fields)
         builder = builder
             .x25519_pubkey(move_pubkey)
             .plaintext_u128(move_nonce)
-            .encrypted_u64(extract_ct(&move_cts, 0))   // player_key_0
-            .encrypted_u64(extract_ct(&move_cts, 1))   // player_key_1
-            .encrypted_u64(extract_ct(&move_cts, 2))   // player_key_2
-            .encrypted_u64(extract_ct(&move_cts, 3))   // player_key_3
-            .encrypted_u64(extract_ct(&move_cts, 4))   // ships_to_send
-            .encrypted_u64(extract_ct(&move_cts, 5))   // metal_to_send
-            .encrypted_u64(extract_ct(&move_cts, 6))   // source_x
-            .encrypted_u64(extract_ct(&move_cts, 7))   // source_y
-            .encrypted_u64(extract_ct(&move_cts, 8))   // target_x
-            .encrypted_u64(extract_ct(&move_cts, 9))   // target_y
-            .encrypted_u64(extract_ct(&move_cts, 10))  // current_slot
-            .encrypted_u64(extract_ct(&move_cts, 11))  // game_speed
-            .encrypted_u64(extract_ct(&move_cts, 12))  // last_updated_slot
+            .encrypted_u64(extract_ct(&move_cts, 0))   // player_id
+            .encrypted_u64(extract_ct(&move_cts, 1))   // source_planet_id
+            .encrypted_u64(extract_ct(&move_cts, 2))   // ships_to_send
+            .encrypted_u64(extract_ct(&move_cts, 3))   // metal_to_send
+            .encrypted_u64(extract_ct(&move_cts, 4))   // source_x
+            .encrypted_u64(extract_ct(&move_cts, 5))   // source_y
+            .encrypted_u64(extract_ct(&move_cts, 6))   // target_x
+            .encrypted_u64(extract_ct(&move_cts, 7))   // target_y
+            .encrypted_u64(extract_ct(&move_cts, 8))   // current_slot
+            .encrypted_u64(extract_ct(&move_cts, 9))   // game_speed
+            .encrypted_u64(extract_ct(&move_cts, 10))  // last_updated_slot
             .x25519_pubkey(observer_pubkey);
 
         let args = builder.build();
@@ -579,37 +648,49 @@ pub mod encrypted_forest {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let enc_state = &o.field_0.field_0;
+        // Output tuple: (Enc<Shared, PlanetDynamic>, Enc<Mxe, PendingMoveData>, Enc<Shared, MoveRevealed>)
+        let enc_dynamic = &o.field_0.field_0;
         let enc_move_data = &o.field_0.field_1;
         let revealed = &o.field_0.field_2;
 
+        // Update source planet — ONLY dynamic section
         let source = &mut ctx.accounts.source_body;
-        source.enc_pubkey = enc_state.encryption_key;
-        source.enc_nonce = enc_state.nonce.to_le_bytes();
+        source.dynamic_enc_pubkey = enc_dynamic.encryption_key;
+        source.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATE_FIELDS {
-            source.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+        while i < PLANET_DYNAMIC_FIELDS {
+            source.dynamic_enc_ciphertexts[i] = enc_dynamic.ciphertexts[i];
             i += 1;
         }
         source.last_updated_slot = Clock::get()?.slot;
 
+        // Pop landing_slot from the FIFO buffer (was pushed by queue_process_move)
         let target_pending = &mut ctx.accounts.target_pending;
-        let new_move = EncryptedPendingMove {
-            active: true,
-            landing_slot: Clock::get()?.slot,
-            enc_pubkey: enc_move_data.encryption_key,
-            enc_nonce: enc_move_data.nonce.to_le_bytes(),
-            enc_ciphertexts: [
-                enc_move_data.ciphertexts[0],
-                enc_move_data.ciphertexts[1],
-                enc_move_data.ciphertexts[2],
-                enc_move_data.ciphertexts[3],
-                enc_move_data.ciphertexts[4],
-                enc_move_data.ciphertexts[5],
-            ],
+        require!(target_pending.queued_count > 0, ErrorCode::InvalidMoveInput);
+        let landing_slot = target_pending.queued_landing_slots[0];
+        // Shift FIFO left
+        let qc = target_pending.queued_count as usize;
+        for j in 1..qc {
+            target_pending.queued_landing_slots[j - 1] = target_pending.queued_landing_slots[j];
+        }
+        target_pending.queued_landing_slots[qc - 1] = 0;
+        target_pending.queued_count -= 1;
+
+        // Sorted insert into moves array
+        let move_id = target_pending.next_move_id;
+        let entry = PendingMoveEntry {
+            landing_slot,
+            move_id,
         };
-        target_pending.moves.push(new_move);
-        target_pending.move_count = target_pending.moves.len() as u8;
+        let pos = target_pending.moves
+            .binary_search_by_key(&landing_slot, |e| e.landing_slot)
+            .unwrap_or_else(|e| e);
+        target_pending.moves.insert(pos, entry);
+        target_pending.move_count = target_pending.moves.len() as u16;
+        target_pending.next_move_id = move_id + 1;
+
+        // enc_move_data (Enc<Mxe, PendingMoveData>) is stored in a PendingMoveAccount.
+        let _ = enc_move_data;
 
         emit!(ProcessMoveEvent {
             encrypted_landing_slot: revealed.ciphertexts[0],
@@ -623,44 +704,103 @@ pub mod encrypted_forest {
     }
 
     // -----------------------------------------------------------------------
-    // Queue flush_planet
-    // state_cts = 19 * 32, flush_cts = 10 * 32
+    // Queue flush_planet (batch up to 8 moves)
+    // Planet state (static + dynamic) read via .account() from celestial_body.
+    // Move data read via .account() from PendingMoveAccount PDAs (remaining_accounts).
+    // flush_timing_cts = 4 * 32
+    // Output: Enc<Shared, PlanetDynamic> — only dynamic section
     // -----------------------------------------------------------------------
 
     pub fn queue_flush_planet(
         ctx: Context<QueueFlushPlanet>,
         computation_offset: u64,
-        _move_index: u8,
-        state_cts: Vec<u8>,      // 19 * 32
-        state_pubkey: [u8; 32],
-        state_nonce: u128,
-        flush_cts: Vec<u8>,      // 10 * 32
+        flush_count: u8,
+        flush_cts: Vec<u8>,      // 4 * 32 (FlushTimingInput)
         flush_pubkey: [u8; 32],
         flush_nonce: u128,
     ) -> Result<()> {
-        require!(state_cts.len() == 19 * 32, ErrorCode::FlushFailed);
-        require!(flush_cts.len() == 10 * 32, ErrorCode::FlushFailed);
+        require!(flush_cts.len() == 4 * 32, ErrorCode::FlushFailed);
+        require!(flush_count >= 1 && flush_count as usize <= MAX_FLUSH_BATCH, ErrorCode::FlushFailed);
+        require!(
+            ctx.remaining_accounts.len() >= flush_count as usize,
+            ErrorCode::FlushFailed
+        );
+
+        let clock = Clock::get()?;
+        let pending = &ctx.accounts.pending_moves;
+
+        // Verify that the first flush_count moves have landed
+        require!(
+            pending.moves.len() >= flush_count as usize,
+            ErrorCode::FlushFailed
+        );
+        for i in 0..flush_count as usize {
+            require!(
+                pending.moves[i].landing_slot <= clock.slot,
+                ErrorCode::FlushFailed
+            );
+        }
+
+        // Validate remaining_accounts are the correct PendingMoveAccount PDAs
+        for i in 0..flush_count as usize {
+            let entry = &pending.moves[i];
+            let (expected_pda, _) = Pubkey::find_program_address(
+                &[
+                    b"move",
+                    pending.game_id.to_le_bytes().as_ref(),
+                    pending.planet_hash.as_ref(),
+                    entry.move_id.to_le_bytes().as_ref(),
+                ],
+                ctx.program_id,
+            );
+            require!(
+                ctx.remaining_accounts[i].key() == expected_pda,
+                ErrorCode::FlushFailed
+            );
+        }
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        // Enc<Shared, PlanetStatic> — read static section from celestial_body
+        // Enc<Shared, PlanetDynamic> — read dynamic section from celestial_body
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(state_pubkey)
-            .plaintext_u128(state_nonce);
-        builder = append_planet_state_args(builder, &state_cts);
+            .account(
+                ctx.accounts.celestial_body.key(),
+                CELESTIAL_BODY_STATIC_OFFSET,
+                ENC_PLANET_STATIC_SIZE,
+            )
+            .account(
+                ctx.accounts.celestial_body.key(),
+                CELESTIAL_BODY_DYNAMIC_OFFSET,
+                ENC_PLANET_DYNAMIC_SIZE,
+            );
 
+        // 8 move slots: active ones read from PendingMoveAccount, inactive padded with zeros
+        for slot_idx in 0..MAX_FLUSH_BATCH {
+            if slot_idx < flush_count as usize {
+                // Read Enc<Mxe, PendingMoveData> directly from PendingMoveAccount
+                builder = builder.account(
+                    ctx.remaining_accounts[slot_idx].key(),
+                    MOVE_ACCOUNT_ENC_OFFSET,
+                    ENC_MOVE_DATA_SIZE,
+                );
+            } else {
+                // Inactive slot: zero nonce + zero ciphertexts
+                builder = builder.plaintext_u128(0u128);
+                for _ in 0..PENDING_MOVE_DATA_FIELDS {
+                    builder = builder.encrypted_u64([0u8; 32]);
+                }
+            }
+        }
+
+        // FlushTimingInput (4 fields: current_slot, game_speed, last_updated_slot, flush_count)
         builder = builder
             .x25519_pubkey(flush_pubkey)
             .plaintext_u128(flush_nonce)
             .encrypted_u64(extract_ct(&flush_cts, 0))  // current_slot
             .encrypted_u64(extract_ct(&flush_cts, 1))  // game_speed
             .encrypted_u64(extract_ct(&flush_cts, 2))  // last_updated_slot
-            .encrypted_u64(extract_ct(&flush_cts, 3))  // move_ships
-            .encrypted_u64(extract_ct(&flush_cts, 4))  // move_metal
-            .encrypted_u64(extract_ct(&flush_cts, 5))  // move_attacker_0
-            .encrypted_u64(extract_ct(&flush_cts, 6))  // move_attacker_1
-            .encrypted_u64(extract_ct(&flush_cts, 7))  // move_attacker_2
-            .encrypted_u64(extract_ct(&flush_cts, 8))  // move_attacker_3
-            .encrypted_u8(extract_ct(&flush_cts, 9));  // move_has_landed
+            .encrypted_u64(extract_ct(&flush_cts, 3));  // flush_count
 
         let args = builder.build();
 
@@ -706,32 +846,37 @@ pub mod encrypted_forest {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let enc_state = &o.field_0.field_0;
-        let revealed = &o.field_0.field_1;
+        // Output: Enc<Shared, PlanetDynamic> (single value, not tuple)
+        let enc_dynamic = &o.field_0;
 
+        // Update planet — ONLY dynamic section
         let planet = &mut ctx.accounts.celestial_body;
-        planet.enc_pubkey = enc_state.encryption_key;
-        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
+        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATE_FIELDS {
-            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+        while i < PLANET_DYNAMIC_FIELDS {
+            planet.dynamic_enc_ciphertexts[i] = enc_dynamic.ciphertexts[i];
             i += 1;
         }
         let slot = Clock::get()?.slot;
         planet.last_updated_slot = slot;
         planet.last_flushed_slot = slot;
 
+        // Remove flushed entries from front of sorted array
         let pending = &mut ctx.accounts.pending_moves;
-        if !pending.moves.is_empty() {
+        let mut flushed = 0;
+        while !pending.moves.is_empty() && pending.moves[0].landing_slot <= slot {
             pending.moves.remove(0);
-            pending.move_count = pending.moves.len() as u8;
+            flushed += 1;
+            if flushed >= MAX_FLUSH_BATCH {
+                break;
+            }
         }
+        pending.move_count = pending.moves.len() as u16;
 
         emit!(FlushPlanetEvent {
             planet_hash: planet.planet_hash,
-            encrypted_success: revealed.ciphertexts[0],
-            encryption_key: revealed.encryption_key,
-            nonce: revealed.nonce.to_le_bytes(),
+            flushed_count: flushed as u8,
         });
 
         Ok(())
@@ -739,21 +884,19 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue upgrade_planet
-    // state_cts = 19 * 32, upgrade_cts = 8 * 32
+    // Planet state (static + dynamic) read via .account() from celestial_body.
+    // upgrade_cts = 6 * 32.
+    // Output: (PlanetStatic, PlanetDynamic, UpgradeRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_upgrade_planet(
         ctx: Context<QueueUpgradePlanet>,
         computation_offset: u64,
-        state_cts: Vec<u8>,       // 19 * 32
-        state_pubkey: [u8; 32],
-        state_nonce: u128,
-        upgrade_cts: Vec<u8>,     // 8 * 32
+        upgrade_cts: Vec<u8>,     // 6 * 32
         upgrade_pubkey: [u8; 32],
         upgrade_nonce: u128,
     ) -> Result<()> {
-        require!(state_cts.len() == 19 * 32, ErrorCode::UpgradeFailed);
-        require!(upgrade_cts.len() == 8 * 32, ErrorCode::UpgradeFailed);
+        require!(upgrade_cts.len() == 6 * 32, ErrorCode::UpgradeFailed);
 
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
@@ -762,22 +905,30 @@ pub mod encrypted_forest {
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        // Enc<Shared, PlanetStatic> — read static section from celestial_body
+        // Enc<Shared, PlanetDynamic> — read dynamic section from celestial_body
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(state_pubkey)
-            .plaintext_u128(state_nonce);
-        builder = append_planet_state_args(builder, &state_cts);
+            .account(
+                ctx.accounts.celestial_body.key(),
+                CELESTIAL_BODY_STATIC_OFFSET,
+                ENC_PLANET_STATIC_SIZE,
+            )
+            .account(
+                ctx.accounts.celestial_body.key(),
+                CELESTIAL_BODY_DYNAMIC_OFFSET,
+                ENC_PLANET_DYNAMIC_SIZE,
+            );
 
+        // UpgradePlanetInput: 6 fields (player_id, focus, current_slot, game_speed, last_updated_slot, metal_upgrade_cost)
         builder = builder
             .x25519_pubkey(upgrade_pubkey)
             .plaintext_u128(upgrade_nonce)
-            .encrypted_u64(extract_ct(&upgrade_cts, 0))  // player_key_0
-            .encrypted_u64(extract_ct(&upgrade_cts, 1))  // player_key_1
-            .encrypted_u64(extract_ct(&upgrade_cts, 2))  // player_key_2
-            .encrypted_u64(extract_ct(&upgrade_cts, 3))  // player_key_3
-            .encrypted_u8(extract_ct(&upgrade_cts, 4))   // focus
-            .encrypted_u64(extract_ct(&upgrade_cts, 5))  // current_slot
-            .encrypted_u64(extract_ct(&upgrade_cts, 6))  // game_speed
-            .encrypted_u64(extract_ct(&upgrade_cts, 7)); // last_updated_slot
+            .encrypted_u64(extract_ct(&upgrade_cts, 0))  // player_id
+            .encrypted_u64(extract_ct(&upgrade_cts, 1))  // focus
+            .encrypted_u64(extract_ct(&upgrade_cts, 2))  // current_slot
+            .encrypted_u64(extract_ct(&upgrade_cts, 3))  // game_speed
+            .encrypted_u64(extract_ct(&upgrade_cts, 4))  // last_updated_slot
+            .encrypted_u64(extract_ct(&upgrade_cts, 5)); // metal_upgrade_cost
 
         let args = builder.build();
 
@@ -816,17 +967,31 @@ pub mod encrypted_forest {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let enc_state = &o.field_0.field_0;
-        let revealed = &o.field_0.field_1;
+        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, UpgradeRevealed>)
+        let enc_static = &o.field_0.field_0;
+        let enc_dynamic = &o.field_0.field_1;
+        let revealed = &o.field_0.field_2;
 
         let planet = &mut ctx.accounts.celestial_body;
-        planet.enc_pubkey = enc_state.encryption_key;
-        planet.enc_nonce = enc_state.nonce.to_le_bytes();
+
+        // Write static section
+        planet.static_enc_pubkey = enc_static.encryption_key;
+        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATE_FIELDS {
-            planet.enc_ciphertexts[i] = enc_state.ciphertexts[i];
+        while i < PLANET_STATIC_FIELDS {
+            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
             i += 1;
         }
+
+        // Write dynamic section
+        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
+        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
+        let mut j = 0;
+        while j < PLANET_DYNAMIC_FIELDS {
+            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
+            j += 1;
+        }
+
         planet.last_updated_slot = Clock::get()?.slot;
 
         emit!(UpgradePlanetEvent {
@@ -852,7 +1017,7 @@ pub mod encrypted_forest {
         planet_hash: [u8; 32],
     ) -> Result<()> {
         let game = &ctx.accounts.game;
-        let computed = compute_planet_hash(x, y, game.game_id);
+        let computed = compute_planet_hash(x, y, game.game_id, game.hash_rounds);
         require!(computed == planet_hash, ErrorCode::InvalidPlanetHash);
 
         emit!(BroadcastEvent {
@@ -913,6 +1078,8 @@ pub struct Game {
     pub whitelist: bool,
     pub server_pubkey: Option<Pubkey>,
     pub noise_thresholds: NoiseThresholds,
+    /// Number of iterated BLAKE3 rounds for planet hash difficulty.
+    pub hash_rounds: u16,
 }
 
 #[account]
@@ -929,9 +1096,14 @@ pub struct EncryptedCelestialBody {
     pub planet_hash: [u8; 32],
     pub last_updated_slot: u64,
     pub last_flushed_slot: u64,
-    pub enc_pubkey: [u8; 32],
-    pub enc_nonce: [u8; 16],
-    pub enc_ciphertexts: [[u8; 32]; 19],
+    // Static section (432 bytes)
+    pub static_enc_pubkey: [u8; 32],
+    pub static_enc_nonce: [u8; 16],
+    pub static_enc_ciphertexts: [[u8; 32]; 12],
+    // Dynamic section (176 bytes)
+    pub dynamic_enc_pubkey: [u8; 32],
+    pub dynamic_enc_nonce: [u8; 16],
+    pub dynamic_enc_ciphertexts: [[u8; 32]; 4],
 }
 
 impl EncryptedCelestialBody {
@@ -939,38 +1111,65 @@ impl EncryptedCelestialBody {
         + 32   // planet_hash
         + 8    // last_updated_slot
         + 8    // last_flushed_slot
-        + 32   // enc_pubkey
-        + 16   // enc_nonce
-        + (19 * 32); // enc_ciphertexts
+        // Static section
+        + 32   // static_enc_pubkey
+        + 16   // static_enc_nonce
+        + (12 * 32) // static_enc_ciphertexts (12 fields)
+        // Dynamic section
+        + 32   // dynamic_enc_pubkey
+        + 16   // dynamic_enc_nonce
+        + (4 * 32); // dynamic_enc_ciphertexts (4 fields)
 }
 
+/// Dynamic-size account tracking pending moves for a planet.
+/// Sorted by landing_slot so front always has earliest-landing move.
+/// Includes a fixed FIFO buffer for landing_slots awaiting callback.
 #[account]
-pub struct EncryptedPendingMoves {
+pub struct PendingMovesMetadata {
     pub game_id: u64,
     pub planet_hash: [u8; 32],
-    pub move_count: u8,
-    pub moves: Vec<EncryptedPendingMove>,
+    pub next_move_id: u64,
+    pub move_count: u16,
+    /// FIFO buffer: queue_process_move pushes, process_move_callback pops.
+    pub queued_count: u8,
+    pub queued_landing_slots: [u64; 8],
+    pub moves: Vec<PendingMoveEntry>,
 }
 
-impl EncryptedPendingMoves {
+impl PendingMovesMetadata {
+    /// Base size (no entries). Grows by PENDING_MOVE_ENTRY_SIZE per move.
+    pub const BASE_SIZE: usize = PENDING_MOVES_META_BASE_SIZE;
+}
+
+/// Entry in the sorted moves array.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]
+pub struct PendingMoveEntry {
+    pub landing_slot: u64,
+    pub move_id: u64,
+}
+
+/// Individual move account (one per in-flight move).
+/// PDA: ["move", game_id, planet_hash, move_id]
+#[account]
+pub struct PendingMoveAccount {
+    pub game_id: u64,
+    pub planet_hash: [u8; 32],
+    pub move_id: u64,
+    pub landing_slot: u64,
+    pub payer: Pubkey,
+    pub enc_nonce: u128,
+    pub enc_ciphertexts: [[u8; 32]; 4],  // ships, metal, attacking_planet_id, attacking_player_id
+}
+
+impl PendingMoveAccount {
     pub const MAX_SIZE: usize = 8
         + 8    // game_id
         + 32   // planet_hash
-        + 1    // move_count
-        + 4 + (MAX_PENDING_MOVES * EncryptedPendingMove::SIZE);
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct EncryptedPendingMove {
-    pub active: bool,
-    pub landing_slot: u64,
-    pub enc_pubkey: [u8; 32],
-    pub enc_nonce: [u8; 16],
-    pub enc_ciphertexts: [[u8; 32]; 6],
-}
-
-impl EncryptedPendingMove {
-    pub const SIZE: usize = 1 + 8 + 32 + 16 + (6 * 32);
+        + 8    // move_id
+        + 8    // landing_slot
+        + 32   // payer
+        + 16   // enc_nonce
+        + (4 * 32); // enc_ciphertexts
 }
 
 // ===========================================================================
@@ -1027,10 +1226,7 @@ pub struct NoiseThresholds {
 
 #[event]
 pub struct InitPlanetEvent {
-    pub encrypted_hash_0: [u8; 32],
-    pub encrypted_hash_1: [u8; 32],
-    pub encrypted_hash_2: [u8; 32],
-    pub encrypted_hash_3: [u8; 32],
+    pub encrypted_planet_hash: [u8; 32],
     pub encrypted_valid: [u8; 32],
     pub encryption_key: [u8; 32],
     pub nonce: [u8; 16],
@@ -1038,10 +1234,7 @@ pub struct InitPlanetEvent {
 
 #[event]
 pub struct InitSpawnPlanetEvent {
-    pub encrypted_hash_0: [u8; 32],
-    pub encrypted_hash_1: [u8; 32],
-    pub encrypted_hash_2: [u8; 32],
-    pub encrypted_hash_3: [u8; 32],
+    pub encrypted_planet_hash: [u8; 32],
     pub encrypted_valid: [u8; 32],
     pub encrypted_spawn_valid: [u8; 32],
     pub encryption_key: [u8; 32],
@@ -1060,9 +1253,7 @@ pub struct ProcessMoveEvent {
 #[event]
 pub struct FlushPlanetEvent {
     pub planet_hash: [u8; 32],
-    pub encrypted_success: [u8; 32],
-    pub encryption_key: [u8; 32],
-    pub nonce: [u8; 16],
+    pub flushed_count: u8,
 }
 
 #[event]
@@ -1097,6 +1288,8 @@ pub enum ErrorCode {
     InvalidMapDiameter,
     #[msg("Invalid game speed")]
     InvalidGameSpeed,
+    #[msg("Hash rounds must be >= 1")]
+    InvalidHashRounds,
     #[msg("End slot must be after start slot")]
     InvalidTimeRange,
     #[msg("Whitelist games require a server pubkey")]
@@ -1131,6 +1324,8 @@ pub enum ErrorCode {
     FlushFailed,
     #[msg("Upgrade failed")]
     UpgradeFailed,
+    #[msg("Must flush landed moves before processing new moves")]
+    MustFlushFirst,
 }
 
 // ===========================================================================
@@ -1273,11 +1468,11 @@ pub struct QueueInitPlanet<'info> {
     #[account(
         init,
         payer = payer,
-        space = EncryptedPendingMoves::MAX_SIZE,
+        space = PendingMovesMetadata::BASE_SIZE,
         seeds = [b"moves", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
     )]
-    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+    pub pending_moves: Box<Account<'info, PendingMovesMetadata>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -1360,11 +1555,11 @@ pub struct QueueInitSpawnPlanet<'info> {
     #[account(
         init,
         payer = payer,
-        space = EncryptedPendingMoves::MAX_SIZE,
+        space = PendingMovesMetadata::BASE_SIZE,
         seeds = [b"moves", game.game_id.to_le_bytes().as_ref(), planet_hash.as_ref()],
         bump,
     )]
-    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+    pub pending_moves: Box<Account<'info, PendingMovesMetadata>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -1433,8 +1628,16 @@ pub struct QueueProcessMove<'info> {
     pub game: Box<Account<'info, Game>>,
     #[account(mut)]
     pub source_body: Box<Account<'info, EncryptedCelestialBody>>,
-    #[account(mut)]
-    pub target_pending: Box<Account<'info, EncryptedPendingMoves>>,
+    /// Source planet's pending moves metadata (read-only, for flush check)
+    pub source_pending: Box<Account<'info, PendingMovesMetadata>>,
+    /// Target planet's pending moves metadata (mut, realloc to fit one more entry)
+    #[account(
+        mut,
+        realloc = PendingMovesMetadata::BASE_SIZE + (target_pending.moves.len() + 1) * PENDING_MOVE_ENTRY_SIZE,
+        realloc::payer = payer,
+        realloc::zero = false,
+    )]
+    pub target_pending: Box<Account<'info, PendingMovesMetadata>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -1485,7 +1688,7 @@ pub struct ProcessMoveCallback<'info> {
     #[account(mut)]
     pub source_body: Box<Account<'info, EncryptedCelestialBody>>,
     #[account(mut)]
-    pub target_pending: Box<Account<'info, EncryptedPendingMoves>>,
+    pub target_pending: Box<Account<'info, PendingMovesMetadata>>,
 }
 
 // --- Queue Flush Planet ---
@@ -1499,7 +1702,7 @@ pub struct QueueFlushPlanet<'info> {
     #[account(mut)]
     pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
     #[account(mut)]
-    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+    pub pending_moves: Box<Account<'info, PendingMovesMetadata>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -1550,7 +1753,7 @@ pub struct FlushPlanetCallback<'info> {
     #[account(mut)]
     pub celestial_body: Box<Account<'info, EncryptedCelestialBody>>,
     #[account(mut)]
-    pub pending_moves: Box<Account<'info, EncryptedPendingMoves>>,
+    pub pending_moves: Box<Account<'info, PendingMovesMetadata>>,
 }
 
 // --- Queue Upgrade Planet ---
@@ -1690,5 +1893,5 @@ pub struct CleanupPlanet<'info> {
         bump,
         close = closer,
     )]
-    pub pending_moves: Account<'info, EncryptedPendingMoves>,
+    pub pending_moves: Account<'info, PendingMovesMetadata>,
 }

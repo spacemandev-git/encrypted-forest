@@ -5,11 +5,15 @@
  * The shared secret with the MXE's public key gives the cipher key.
  * Clients who know (x, y) can decrypt planet state locally without any transaction.
  *
+ * The on-chain EncryptedCelestialBody stores TWO separate encryption sections:
+ *   - Static (12 fields): body_type, size, max_ship_capacity, ship_gen_speed,
+ *     max_metal_capacity, metal_gen_speed, range, launch_velocity,
+ *     level, comet_count, comet_0, comet_1
+ *   - Dynamic (4 fields): ship_count, metal_count, owner_exists, owner_id
+ *
  * NOTE: Actual RescueCipher encryption/decryption requires @arcium-hq/client.
  * The placeholders below read raw little-endian u64 from ciphertext bytes,
  * which only works with the placeholder encryptFieldElement.
- * When @arcium-hq/client is integrated, replace encrypt/decrypt bodies
- * with the real RescueCipher calls.
  */
 
 import { x25519 } from "@noble/curves/ed25519.js";
@@ -18,19 +22,12 @@ import { x25519 } from "@noble/curves/ed25519.js";
 // Decrypted state interfaces
 // ---------------------------------------------------------------------------
 
-/** Decrypted planet state -- the 19 fields in order. */
-export interface PlanetState {
+/** Decrypted static planet properties -- the 12 fields in order. */
+export interface PlanetStaticState {
   bodyType: number;
   size: number;
-  ownerExists: number;
-  owner0: bigint;
-  owner1: bigint;
-  owner2: bigint;
-  owner3: bigint;
-  shipCount: bigint;
   maxShipCapacity: bigint;
   shipGenSpeed: bigint;
-  metalCount: bigint;
   maxMetalCapacity: bigint;
   metalGenSpeed: bigint;
   range: bigint;
@@ -41,14 +38,26 @@ export interface PlanetState {
   comet1: number;
 }
 
-/** Decrypted pending move data -- the 6 fields in order. */
+/** Decrypted dynamic planet properties -- the 4 fields in order. */
+export interface PlanetDynamicState {
+  shipCount: bigint;
+  metalCount: bigint;
+  ownerExists: number;
+  ownerId: bigint;
+}
+
+/** Combined decrypted planet state (convenience type). */
+export interface PlanetState {
+  static: PlanetStaticState;
+  dynamic: PlanetDynamicState;
+}
+
+/** Decrypted pending move data -- the 4 fields in order. */
 export interface PendingMoveData {
   shipsArriving: bigint;
   metalArriving: bigint;
-  attacker0: bigint;
-  attacker1: bigint;
-  attacker2: bigint;
-  attacker3: bigint;
+  attackingPlanetId: bigint;
+  attackingPlayerId: bigint;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,115 +126,127 @@ export function decryptFieldElement(
 // ---------------------------------------------------------------------------
 
 /**
- * Decrypt all 19 PlanetState fields from encrypted ciphertexts.
+ * Decrypt the 12 PlanetStatic fields from static encryption section.
  */
-export function decryptPlanetState(
+export function decryptPlanetStatic(
   planetHash: Uint8Array,
-  mxePublicKey: Uint8Array,
-  nonce: Uint8Array,
+  encPubkey: Uint8Array,
+  encNonce: Uint8Array,
   ciphertexts: Uint8Array[]
-): PlanetState {
-  if (ciphertexts.length < 19) {
+): PlanetStaticState {
+  if (ciphertexts.length < 12) {
     throw new Error(
-      `Expected 19 ciphertexts for PlanetState, got ${ciphertexts.length}`
+      `Expected 12 ciphertexts for PlanetStatic, got ${ciphertexts.length}`
     );
   }
 
-  const sharedSecret = computeSharedSecret(planetHash, mxePublicKey);
+  const sharedSecret = computeSharedSecret(planetHash, encPubkey);
 
   const decryptField = (index: number): bigint =>
-    decryptFieldElement(ciphertexts[index], sharedSecret, nonce);
+    decryptFieldElement(ciphertexts[index], sharedSecret, encNonce);
 
   return {
     bodyType: Number(decryptField(0)),
     size: Number(decryptField(1)),
-    ownerExists: Number(decryptField(2)),
-    owner0: decryptField(3),
-    owner1: decryptField(4),
-    owner2: decryptField(5),
-    owner3: decryptField(6),
-    shipCount: decryptField(7),
-    maxShipCapacity: decryptField(8),
-    shipGenSpeed: decryptField(9),
-    metalCount: decryptField(10),
-    maxMetalCapacity: decryptField(11),
-    metalGenSpeed: decryptField(12),
-    range: decryptField(13),
-    launchVelocity: decryptField(14),
-    level: Number(decryptField(15)),
-    cometCount: Number(decryptField(16)),
-    comet0: Number(decryptField(17)),
-    comet1: Number(decryptField(18)),
+    maxShipCapacity: decryptField(2),
+    shipGenSpeed: decryptField(3),
+    maxMetalCapacity: decryptField(4),
+    metalGenSpeed: decryptField(5),
+    range: decryptField(6),
+    launchVelocity: decryptField(7),
+    level: Number(decryptField(8)),
+    cometCount: Number(decryptField(9)),
+    comet0: Number(decryptField(10)),
+    comet1: Number(decryptField(11)),
   };
 }
 
 /**
- * Decrypt pending move data (6 fields).
+ * Decrypt the 4 PlanetDynamic fields from dynamic encryption section.
  */
-export function decryptPendingMoveData(
+export function decryptPlanetDynamic(
   planetHash: Uint8Array,
-  mxePublicKey: Uint8Array,
-  nonce: Uint8Array,
+  encPubkey: Uint8Array,
+  encNonce: Uint8Array,
   ciphertexts: Uint8Array[]
-): PendingMoveData {
-  if (ciphertexts.length < 6) {
+): PlanetDynamicState {
+  if (ciphertexts.length < 4) {
     throw new Error(
-      `Expected 6 ciphertexts for PendingMoveData, got ${ciphertexts.length}`
+      `Expected 4 ciphertexts for PlanetDynamic, got ${ciphertexts.length}`
     );
   }
 
-  const sharedSecret = computeSharedSecret(planetHash, mxePublicKey);
+  const sharedSecret = computeSharedSecret(planetHash, encPubkey);
 
   const decryptField = (index: number): bigint =>
-    decryptFieldElement(ciphertexts[index], sharedSecret, nonce);
+    decryptFieldElement(ciphertexts[index], sharedSecret, encNonce);
 
   return {
-    shipsArriving: decryptField(0),
-    metalArriving: decryptField(1),
-    attacker0: decryptField(2),
-    attacker1: decryptField(3),
-    attacker2: decryptField(4),
-    attacker3: decryptField(5),
+    shipCount: decryptField(0),
+    metalCount: decryptField(1),
+    ownerExists: Number(decryptField(2)),
+    ownerId: decryptField(3),
   };
 }
 
-// ---------------------------------------------------------------------------
-// Pubkey <-> u64 parts conversion
-// ---------------------------------------------------------------------------
-
 /**
- * Reconstruct a 32-byte public key from 4 little-endian u64 parts.
+ * Decrypt both static and dynamic sections from an EncryptedCelestialBodyAccount.
  */
-export function pubkeyFromParts(
-  p0: bigint,
-  p1: bigint,
-  p2: bigint,
-  p3: bigint
-): Uint8Array {
-  const buf = new ArrayBuffer(32);
-  const view = new DataView(buf);
-  view.setBigUint64(0, p0, true);
-  view.setBigUint64(8, p1, true);
-  view.setBigUint64(16, p2, true);
-  view.setBigUint64(24, p3, true);
-  return new Uint8Array(buf);
+export function decryptPlanetState(
+  planetHash: Uint8Array,
+  account: {
+    staticEncPubkey: Uint8Array;
+    staticEncNonce: Uint8Array;
+    staticEncCiphertexts: Uint8Array[];
+    dynamicEncPubkey: Uint8Array;
+    dynamicEncNonce: Uint8Array;
+    dynamicEncCiphertexts: Uint8Array[];
+  }
+): PlanetState {
+  return {
+    static: decryptPlanetStatic(
+      planetHash,
+      account.staticEncPubkey,
+      account.staticEncNonce,
+      account.staticEncCiphertexts
+    ),
+    dynamic: decryptPlanetDynamic(
+      planetHash,
+      account.dynamicEncPubkey,
+      account.dynamicEncNonce,
+      account.dynamicEncCiphertexts
+    ),
+  };
 }
 
 /**
- * Split a 32-byte public key into 4 little-endian u64 parts.
+ * Decrypt pending move data (4 fields).
+ * PendingMoveData is Enc<Mxe, ...> so only MXE can decrypt in production.
+ * This placeholder supports local testing with plaintext ciphertexts.
  */
-export function pubkeyToParts(
-  pubkey: Uint8Array
-): [bigint, bigint, bigint, bigint] {
-  const view = new DataView(
-    pubkey.buffer,
-    pubkey.byteOffset,
-    pubkey.byteLength
-  );
-  return [
-    view.getBigUint64(0, true),
-    view.getBigUint64(8, true),
-    view.getBigUint64(16, true),
-    view.getBigUint64(24, true),
-  ];
+export function decryptPendingMoveData(
+  _planetHash: Uint8Array,
+  _mxePublicKey: Uint8Array,
+  nonce: Uint8Array,
+  ciphertexts: Uint8Array[]
+): PendingMoveData {
+  if (ciphertexts.length < 4) {
+    throw new Error(
+      `Expected 4 ciphertexts for PendingMoveData, got ${ciphertexts.length}`
+    );
+  }
+
+  // NOTE: PendingMoveData is Enc<Mxe, ...> so clients cannot decrypt it.
+  // This reads raw LE u64 for local testing only.
+  const readU64 = (ct: Uint8Array): bigint => {
+    const view = new DataView(ct.buffer, ct.byteOffset, ct.byteLength);
+    return view.getBigUint64(0, true);
+  };
+
+  return {
+    shipsArriving: readU64(ciphertexts[0]),
+    metalArriving: readU64(ciphertexts[1]),
+    attackingPlanetId: readU64(ciphertexts[2]),
+    attackingPlayerId: readU64(ciphertexts[3]),
+  };
 }

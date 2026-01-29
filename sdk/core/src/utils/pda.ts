@@ -80,3 +80,24 @@ export function derivePendingMovesPDA(
     programId
   );
 }
+
+/**
+ * Derive a PendingMoveAccount PDA.
+ * Seeds: ["move", game_id.to_le_bytes(), planet_hash(32 bytes), move_id.to_le_bytes()]
+ */
+export function derivePendingMoveAccountPDA(
+  gameId: bigint,
+  planetHash: Uint8Array,
+  moveId: bigint,
+  programId: PublicKey = PROGRAM_ID
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("move"),
+      u64ToLeBytes(gameId),
+      planetHash,
+      u64ToLeBytes(moveId),
+    ],
+    programId
+  );
+}

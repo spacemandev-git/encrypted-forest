@@ -42,11 +42,11 @@ import {
   computePlanetHash,
   derivePlanetPDA,
   derivePendingMovesPDA,
+  derivePendingMoveAccountPDA,
   derivePlayerPDA,
   buildProcessMoveValues,
   buildFlushPlanetValues,
   buildUpgradePlanetValues,
-  packEncryptedState,
   nextGameId,
   awaitComputationFinalization,
   getArciumEnv,
@@ -159,7 +159,6 @@ describe("Arcium Init Planet", () => {
       gameId,
       coord.x,
       coord.y,
-      DEFAULT_THRESHOLDS,
       encCtx
     );
 
@@ -175,12 +174,19 @@ describe("Arcium Init Planet", () => {
     // Verify the encrypted celestial body account
     const bodyAccount = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(bodyAccount.planetHash).toEqual(Array.from(coord.hash));
-    expect(bodyAccount.encPubkey.length).toBe(32);
-    expect(bodyAccount.encNonce.length).toBe(16);
-    expect(bodyAccount.encCiphertexts.length).toBe(19);
+    expect(bodyAccount.staticEncPubkey.length).toBe(32);
+    expect(bodyAccount.staticEncNonce.length).toBe(16);
+    expect(bodyAccount.staticEncCiphertexts.length).toBe(12);
+    expect(bodyAccount.dynamicEncPubkey.length).toBe(32);
+    expect(bodyAccount.dynamicEncNonce.length).toBe(16);
+    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(4);
 
-    // Each ciphertext should be 32 bytes
-    for (const ct of bodyAccount.encCiphertexts) {
+    // Each static ciphertext should be 32 bytes
+    for (const ct of bodyAccount.staticEncCiphertexts) {
+      expect(ct.length).toBe(32);
+    }
+    // Each dynamic ciphertext should be 32 bytes
+    for (const ct of bodyAccount.dynamicEncCiphertexts) {
       expect(ct.length).toBe(32);
     }
 
@@ -202,13 +208,13 @@ describe("Arcium Init Planet", () => {
 
     // First init should succeed
     await queueInitPlanet(
-      program, admin, gameId, coord.x, coord.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, coord.x, coord.y, encCtx
     );
 
     // Second init should fail (planet PDA already exists)
     await expect(
       queueInitPlanet(
-        program, admin, gameId, coord.x, coord.y, DEFAULT_THRESHOLDS, encCtx
+        program, admin, gameId, coord.x, coord.y, encCtx
       )
     ).rejects.toThrow();
   });
@@ -260,7 +266,8 @@ describe("Arcium Init Spawn Planet", () => {
       gameId,
       spawn.x,
       spawn.y,
-      DEFAULT_THRESHOLDS,
+      0n,
+      0n,
       encCtx
     );
 
@@ -279,7 +286,8 @@ describe("Arcium Init Spawn Planet", () => {
     // Verify encrypted celestial body was created
     const bodyAccount = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(bodyAccount.planetHash).toEqual(Array.from(spawn.hash));
-    expect(bodyAccount.encCiphertexts.length).toBe(19);
+    expect(bodyAccount.staticEncCiphertexts.length).toBe(12);
+    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(4);
   });
 
   it("rejects spawn when player already spawned", async () => {
@@ -296,7 +304,7 @@ describe("Arcium Init Spawn Planet", () => {
     // First spawn
     const spawn1 = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: co1 } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn1.x, spawn1.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn1.x, spawn1.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, co1, program.programId, "confirmed");
 
@@ -307,7 +315,7 @@ describe("Arcium Init Spawn Planet", () => {
     if (spawn2.x !== spawn1.x || spawn2.y !== spawn1.y) {
       await expect(
         queueInitSpawnPlanet(
-          program, admin, gameId, spawn2.x, spawn2.y, DEFAULT_THRESHOLDS, encCtx
+          program, admin, gameId, spawn2.x, spawn2.y, 0n, 0n, encCtx
         )
       ).rejects.toThrow();
     }
@@ -353,8 +361,9 @@ describe("Arcium Process Move", () => {
 
     // Spawn at source planet
     const source = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
+    const sourceHash = computePlanetHash(source.x, source.y, gameId);
     const { computationOffset: spawnCO, planetPDA: sourcePDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, source.x, source.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, source.x, source.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -362,18 +371,24 @@ describe("Arcium Process Move", () => {
     const target = findPlanetOfType(gameId, DEFAULT_THRESHOLDS, CelestialBodyType.Planet, 2, 1000, 100_000, 50_000);
     const targetHash = computePlanetHash(target.x, target.y, gameId);
     const { computationOffset: initCO } = await queueInitPlanet(
-      program, admin, gameId, target.x, target.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, target.x, target.y, encCtx
     );
     await awaitComputationFinalization(provider, initCO, program.programId, "confirmed");
 
+    const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourceHash, program.programId);
     const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetHash, program.programId);
 
     // Read source body state for re-submission
     const sourceBody = await program.account.encryptedCelestialBody.fetch(sourcePDA);
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
 
+    // Use placeholder playerId (1n) and sourcePlanetId (0n)
+    const playerId = 1n;
+    const sourcePlanetId = 0n;
+
     const moveValues = buildProcessMoveValues(
-      admin.publicKey,
+      playerId,
+      sourcePlanetId,
       5n,    // ships_to_send
       0n,    // metal_to_send
       source.x,
@@ -385,17 +400,18 @@ describe("Arcium Process Move", () => {
       BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
+    // Compute landing slot for the move
+    const distance = BigInt(Math.abs(Number(target.x - source.x)) + Math.abs(Number(target.y - source.y)));
+    const landingSlot = currentSlot + (distance * 10000n) / 2n; // approximate
+
     const { computationOffset: moveCO } = await queueProcessMove(
       program,
       admin,
       gameId,
       sourcePDA,
+      sourcePendingPDA,
       targetPendingPDA,
-      {
-        encPubkey: sourceBody.encPubkey as any,
-        encNonce: sourceBody.encNonce as any,
-        encCiphertexts: sourceBody.encCiphertexts as any,
-      },
+      landingSlot,
       moveValues,
       encCtx
     );
@@ -406,11 +422,10 @@ describe("Arcium Process Move", () => {
     console.log("Process move finalized:", finalizeSig);
 
     // Verify a pending move was added to the target
-    const targetPending = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(targetPending.moveCount).toBe(1);
+    const targetPending = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
     expect(targetPending.moves.length).toBe(1);
-    expect(targetPending.moves[0].active).toBe(true);
-    expect(targetPending.moves[0].encCiphertexts.length).toBe(6);
+    expect(targetPending.moves[0].landingSlot).toBeDefined();
+    expect(targetPending.moves[0].payer).toBeDefined();
   });
 
   it("rejects process_move when too many pending moves", async () => {
@@ -466,8 +481,9 @@ describe("Arcium Flush Planet", () => {
 
     // Set up: spawn + init target + process move (same as above)
     const source = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
+    const sourceHash = computePlanetHash(source.x, source.y, gameId);
     const { computationOffset: spawnCO, planetPDA: sourcePDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, source.x, source.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, source.x, source.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -475,56 +491,55 @@ describe("Arcium Flush Planet", () => {
     const targetHash = computePlanetHash(target.x, target.y, gameId);
     const [targetPlanetPDA] = derivePlanetPDA(gameId, targetHash, program.programId);
     const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetHash, program.programId);
+    const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourceHash, program.programId);
 
     const { computationOffset: initCO } = await queueInitPlanet(
-      program, admin, gameId, target.x, target.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, target.x, target.y, encCtx
     );
     await awaitComputationFinalization(provider, initCO, program.programId, "confirmed");
 
     // Send a move
     const sourceBody = await program.account.encryptedCelestialBody.fetch(sourcePDA);
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
+    const playerId = 1n;
+    const sourcePlanetId = 0n;
     const moveValues = buildProcessMoveValues(
-      admin.publicKey, 5n, 0n,
+      playerId, sourcePlanetId, 5n, 0n,
       source.x, source.y, target.x, target.y,
       currentSlot, 10000n, BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
+    // Compute landing slot
+    const distance = BigInt(Math.abs(Number(target.x - source.x)) + Math.abs(Number(target.y - source.y)));
+    const landingSlot = currentSlot + (distance * 10000n) / 2n;
+
     const { computationOffset: moveCO } = await queueProcessMove(
-      program, admin, gameId, sourcePDA, targetPendingPDA,
-      {
-        encPubkey: sourceBody.encPubkey as any,
-        encNonce: sourceBody.encNonce as any,
-        encCiphertexts: sourceBody.encCiphertexts as any,
-      },
-      moveValues, encCtx
+      program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
+      landingSlot, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 
     // Now flush the target planet
     const targetBody = await program.account.encryptedCelestialBody.fetch(targetPlanetPDA);
-    const targetPending = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(targetPending.moveCount).toBe(1);
+    const targetPending = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
+    expect(targetPending.moves.length).toBe(1);
 
     const flushSlot = BigInt(await provider.connection.getSlot("confirmed"));
+    const flushCount = 1;
     const flushValues = buildFlushPlanetValues(
       flushSlot,
       10000n,
       BigInt(targetBody.lastUpdatedSlot.toString()),
-      5n,   // ships from the move
-      0n,   // metal from the move
-      admin.publicKey,
-      true  // move has landed
+      BigInt(flushCount),
     );
+
+    // Derive PendingMoveAccount PDAs for the moves to flush
+    const moveId = targetPending.moves[0].moveId;
+    const [moveAccountPDA] = derivePendingMoveAccountPDA(gameId, targetHash, BigInt(moveId.toString()), program.programId);
 
     const { computationOffset: flushCO } = await queueFlushPlanet(
       program, admin, targetPlanetPDA, targetPendingPDA,
-      {
-        encPubkey: targetBody.encPubkey as any,
-        encNonce: targetBody.encNonce as any,
-        encCiphertexts: targetBody.encCiphertexts as any,
-      },
-      flushValues, 0, encCtx
+      flushCount, flushValues, [moveAccountPDA], encCtx
     );
 
     const flushSig = await awaitComputationFinalization(
@@ -533,8 +548,7 @@ describe("Arcium Flush Planet", () => {
     console.log("Flush planet finalized:", flushSig);
 
     // Verify the pending move was removed
-    const afterPending = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(afterPending.moveCount).toBe(0);
+    const afterPending = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
     expect(afterPending.moves.length).toBe(0);
 
     // Verify the planet state was updated
@@ -583,7 +597,7 @@ describe("Arcium Upgrade Planet", () => {
     // Spawn on a planet to own it
     const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: spawnCO, planetPDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn.x, spawn.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -591,21 +605,20 @@ describe("Arcium Upgrade Planet", () => {
     const bodyBefore = await program.account.encryptedCelestialBody.fetch(planetPDA);
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
 
+    const playerId = 1n;
+    const metalUpgradeCost = 100n; // base upgrade cost for level 0
+
     const upgradeValues = buildUpgradePlanetValues(
-      admin.publicKey,
+      playerId,
       UpgradeFocus.Range,
       currentSlot,
       10000n,
-      BigInt(bodyBefore.lastUpdatedSlot.toString())
+      BigInt(bodyBefore.lastUpdatedSlot.toString()),
+      metalUpgradeCost
     );
 
     const { computationOffset: upgradeCO } = await queueUpgradePlanet(
       program, admin, gameId, planetPDA,
-      {
-        encPubkey: bodyBefore.encPubkey as any,
-        encNonce: bodyBefore.encNonce as any,
-        encCiphertexts: bodyBefore.encCiphertexts as any,
-      },
       upgradeValues, encCtx
     );
 
@@ -621,12 +634,19 @@ describe("Arcium Upgrade Planet", () => {
     );
     // The enc_nonce and/or enc_ciphertexts should differ from before
     // (the MPC re-encrypted with new state)
-    const beforeNonce = Buffer.from(bodyBefore.encNonce as any).toString("hex");
-    const afterNonce = Buffer.from(bodyAfter.encNonce as any).toString("hex");
-    // After upgrade, at minimum the nonce or ciphertexts should change
-    const ctsBefore = bodyBefore.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const ctsAfter = bodyAfter.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    expect(beforeNonce + ctsBefore).not.toBe(afterNonce + ctsAfter);
+    const beforeStaticNonce = Buffer.from(bodyBefore.staticEncNonce as any).toString("hex");
+    const afterStaticNonce = Buffer.from(bodyAfter.staticEncNonce as any).toString("hex");
+    const beforeDynamicNonce = Buffer.from(bodyBefore.dynamicEncNonce as any).toString("hex");
+    const afterDynamicNonce = Buffer.from(bodyAfter.dynamicEncNonce as any).toString("hex");
+    // After upgrade, at minimum the dynamic nonce or ciphertexts should change
+    const dynamicCtsBefore = bodyBefore.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const dynamicCtsAfter = bodyAfter.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticCtsBefore = bodyBefore.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticCtsAfter = bodyAfter.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    // At least one of the encrypted fields should have changed
+    const beforeAll = beforeStaticNonce + staticCtsBefore + beforeDynamicNonce + dynamicCtsBefore;
+    const afterAll = afterStaticNonce + staticCtsAfter + afterDynamicNonce + dynamicCtsAfter;
+    expect(beforeAll).not.toBe(afterAll);
   });
 });
 

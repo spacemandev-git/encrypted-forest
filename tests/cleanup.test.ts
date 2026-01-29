@@ -123,7 +123,7 @@ describe("Cleanup - Rejection Before Game End", () => {
 
     const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset } = await queueInitPlanet(
-      program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx!
+      program, admin, gameId, spawn.x, spawn.y, encCtx!
     );
     await awaitComputationFinalization(provider, computationOffset, program.programId, "confirmed");
 

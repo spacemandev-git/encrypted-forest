@@ -38,6 +38,7 @@ import {
   computeLandingSlot,
   derivePlanetPDA,
   derivePendingMovesPDA,
+  derivePendingMoveAccountPDA,
   buildProcessMoveValues,
   buildFlushPlanetValues,
   findSpawnPlanet,
@@ -193,10 +194,10 @@ describe("Queue Process Move", () => {
     await createGame(program, admin, defaultGameConfig(gameId));
     await initPlayer(program, admin, gameId);
 
-    // Spawn at source
+    // Spawn at source (playerId=0n for first player, sourcePlanetId=0n for spawn)
     const source = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: spawnCO, planetPDA: sourcePDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, source.x, source.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, source.x, source.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -206,7 +207,7 @@ describe("Queue Process Move", () => {
     const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetHash, program.programId);
 
     const { computationOffset: initCO } = await queueInitPlanet(
-      program, admin, gameId, target.x, target.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, target.x, target.y, encCtx
     );
     await awaitComputationFinalization(provider, initCO, program.programId, "confirmed");
 
@@ -214,34 +215,36 @@ describe("Queue Process Move", () => {
     const sourceBody = await program.account.encryptedCelestialBody.fetch(sourcePDA);
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
 
+    // Derive source pending moves PDA
+    const sourceHash = computePlanetHash(source.x, source.y, gameId);
+    const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourceHash, program.programId);
+
+    // Compute landing slot for the move
+    const distance = computeDistance(source.x, source.y, target.x, target.y);
+    const launchVelocity = BigInt(sourceBody.launchVelocity?.toString() || "2");
+    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 10000n);
+
     const moveValues = buildProcessMoveValues(
-      admin.publicKey,
-      3n, 0n,
+      1n, 0n,    // playerId, sourcePlanetId
+      3n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
       currentSlot, 10000n,
       BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
     const { computationOffset: moveCO } = await queueProcessMove(
-      program, admin, gameId, sourcePDA, targetPendingPDA,
-      {
-        encPubkey: sourceBody.encPubkey as any,
-        encNonce: sourceBody.encNonce as any,
-        encCiphertexts: sourceBody.encCiphertexts as any,
-      },
-      moveValues, encCtx
+      program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
+      landingSlot, moveValues, encCtx
     );
 
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 
     // Verify pending move
-    const pending = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(pending.moveCount).toBe(1);
+    const pending = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
     expect(pending.moves.length).toBe(1);
-    expect(pending.moves[0].active).toBe(true);
-    expect(pending.moves[0].encPubkey.length).toBe(32);
-    expect(pending.moves[0].encNonce.length).toBe(16);
-    expect(pending.moves[0].encCiphertexts.length).toBe(6);
+    expect(pending.moves[0].landingSlot).toBeDefined();
+    expect(pending.moves[0].moveId).toBeDefined();
+    expect(pending.moves[0].payer).toBeDefined();
   });
 
   it("updates source planet encrypted state after move", async () => {
@@ -256,7 +259,7 @@ describe("Queue Process Move", () => {
 
     const source = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: spawnCO, planetPDA: sourcePDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, source.x, source.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, source.x, source.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -268,28 +271,33 @@ describe("Queue Process Move", () => {
     const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetHash, program.programId);
 
     const { computationOffset: initCO } = await queueInitPlanet(
-      program, admin, gameId, target.x, target.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, target.x, target.y, encCtx
     );
     await awaitComputationFinalization(provider, initCO, program.programId, "confirmed");
 
     // Send move
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
+
+    // Derive source pending moves PDA
+    const sourceHash = computePlanetHash(source.x, source.y, gameId);
+    const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourceHash, program.programId);
+
+    // Compute landing slot
+    const distance = computeDistance(source.x, source.y, target.x, target.y);
+    const launchVelocity = BigInt(bodyBefore.launchVelocity?.toString() || "2");
+    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 10000n);
+
     const moveValues = buildProcessMoveValues(
-      admin.publicKey,
-      3n, 0n,
+      1n, 0n,    // playerId, sourcePlanetId
+      3n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
       currentSlot, 10000n,
       BigInt(bodyBefore.lastUpdatedSlot.toString())
     );
 
     const { computationOffset: moveCO } = await queueProcessMove(
-      program, admin, gameId, sourcePDA, targetPendingPDA,
-      {
-        encPubkey: bodyBefore.encPubkey as any,
-        encNonce: bodyBefore.encNonce as any,
-        encCiphertexts: bodyBefore.encCiphertexts as any,
-      },
-      moveValues, encCtx
+      program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
+      landingSlot, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 
@@ -299,12 +307,20 @@ describe("Queue Process Move", () => {
     expect(Number(bodyAfter.lastUpdatedSlot)).toBeGreaterThanOrEqual(
       Number(bodyBefore.lastUpdatedSlot)
     );
-    // Ciphertexts should have changed
-    const ctsBefore = bodyBefore.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const ctsAfter = bodyAfter.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const nonceBefore = Buffer.from(bodyBefore.encNonce as any).toString("hex");
-    const nonceAfter = Buffer.from(bodyAfter.encNonce as any).toString("hex");
-    expect(nonceBefore + ctsBefore).not.toBe(nonceAfter + ctsAfter);
+    // Ciphertexts should have changed (check both static and dynamic)
+    const staticCtsBefore = bodyBefore.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticCtsAfter = bodyAfter.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const dynamicCtsBefore = bodyBefore.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const dynamicCtsAfter = bodyAfter.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticNonceBefore = Buffer.from(bodyBefore.staticEncNonce as any).toString("hex");
+    const staticNonceAfter = Buffer.from(bodyAfter.staticEncNonce as any).toString("hex");
+    const dynamicNonceBefore = Buffer.from(bodyBefore.dynamicEncNonce as any).toString("hex");
+    const dynamicNonceAfter = Buffer.from(bodyAfter.dynamicEncNonce as any).toString("hex");
+
+    // At least the dynamic state should change (ships deducted)
+    const beforeFingerprint = dynamicNonceBefore + dynamicCtsBefore;
+    const afterFingerprint = dynamicNonceAfter + dynamicCtsAfter;
+    expect(beforeFingerprint).not.toBe(afterFingerprint);
   });
 });
 
@@ -347,7 +363,7 @@ describe("Queue Flush Planet", () => {
     // Set up: spawn + init target + move
     const source = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: spawnCO, planetPDA: sourcePDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, source.x, source.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, source.x, source.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -357,32 +373,42 @@ describe("Queue Flush Planet", () => {
     const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetHash, program.programId);
 
     const { computationOffset: initCO } = await queueInitPlanet(
-      program, admin, gameId, target.x, target.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, target.x, target.y, encCtx
     );
     await awaitComputationFinalization(provider, initCO, program.programId, "confirmed");
 
     // Send move
     const sourceBody = await program.account.encryptedCelestialBody.fetch(sourcePDA);
     const slot1 = BigInt(await provider.connection.getSlot("confirmed"));
+
+    // Derive source pending moves PDA
+    const sourceHash = computePlanetHash(source.x, source.y, gameId);
+    const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourceHash, program.programId);
+
+    // Compute landing slot
+    const distance = computeDistance(source.x, source.y, target.x, target.y);
+    const launchVelocity = BigInt(sourceBody.launchVelocity?.toString() || "2");
+    const landingSlot = computeLandingSlot(slot1, distance, launchVelocity, 10000n);
+
     const moveValues = buildProcessMoveValues(
-      admin.publicKey, 5n, 0n,
+      1n, 0n,    // playerId, sourcePlanetId
+      5n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
       slot1, 10000n, BigInt(sourceBody.lastUpdatedSlot.toString())
     );
     const { computationOffset: moveCO } = await queueProcessMove(
-      program, admin, gameId, sourcePDA, targetPendingPDA,
-      {
-        encPubkey: sourceBody.encPubkey as any,
-        encNonce: sourceBody.encNonce as any,
-        encCiphertexts: sourceBody.encCiphertexts as any,
-      },
-      moveValues, encCtx
+      program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
+      landingSlot, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 
     // Verify 1 pending move
-    const pendingBefore = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(pendingBefore.moveCount).toBe(1);
+    const pendingBefore = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
+    expect(pendingBefore.moves.length).toBe(1);
+
+    // Get the move ID and derive the PendingMoveAccount PDA
+    const moveId = BigInt(pendingBefore.moves[0].moveId.toString());
+    const [moveAccountPDA] = derivePendingMoveAccountPDA(gameId, targetHash, moveId, program.programId);
 
     // Flush
     const targetBody = await program.account.encryptedCelestialBody.fetch(targetPlanetPDA);
@@ -390,22 +416,16 @@ describe("Queue Flush Planet", () => {
     const flushValues = buildFlushPlanetValues(
       slot2, 10000n,
       BigInt(targetBody.lastUpdatedSlot.toString()),
-      5n, 0n, admin.publicKey, true
+      1n
     );
     const { computationOffset: flushCO } = await queueFlushPlanet(
       program, admin, targetPlanetPDA, targetPendingPDA,
-      {
-        encPubkey: targetBody.encPubkey as any,
-        encNonce: targetBody.encNonce as any,
-        encCiphertexts: targetBody.encCiphertexts as any,
-      },
-      flushValues, 0, encCtx
+      1, flushValues, [moveAccountPDA], encCtx
     );
     await awaitComputationFinalization(provider, flushCO, program.programId, "confirmed");
 
     // Verify pending move was removed
-    const pendingAfter = await program.account.encryptedPendingMoves.fetch(targetPendingPDA);
-    expect(pendingAfter.moveCount).toBe(0);
+    const pendingAfter = await program.account.pendingMovesMetadata.fetch(targetPendingPDA);
     expect(pendingAfter.moves.length).toBe(0);
 
     // Verify last_flushed_slot was updated

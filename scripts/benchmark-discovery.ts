@@ -15,11 +15,20 @@
  *   - Practical max rounds ≈ 400–800 (leaving room for account reads + logic)
  *   - Conservative safe max: ~300 rounds
  *
+ * Map coordinates are i64 in Rust, so max radius is 9,223,372,036,854,775,807
+ * (2^63 - 1). Even a radius of 10 billion only scratches the surface — the
+ * coordinate space is effectively infinite for gameplay purposes.
+ *
+ * Supports multithreaded scanning via Bun Workers. Default runs at 1, 4, and
+ * 8 cores to show scaling. Use --cores N to run with a specific thread count.
+ *
  * Usage:
- *   bun run scripts/benchmark-discovery.ts [--size N] [--rounds N] [--gameId N]
+ *   bun run scripts/benchmark-discovery.ts [--size N] [--rounds N] [--cores N]
  */
 
 import { blake3 } from "@noble/hashes/blake3.js";
+import type { WorkerResult, WorkerTask } from "./benchmark-worker.js";
+import { availableParallelism } from "node:os";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -34,17 +43,23 @@ interface BenchConfig {
   gameId: bigint;
   /** Threshold for byte[0] — values >= this mean a planet exists. */
   deadSpaceThreshold: number;
+  /** Number of worker threads. null = run comparison at 1/4/8. */
+  cores: number | null;
 }
 
 const defaults: BenchConfig = {
   mapRadius: 50,
-  rounds: 1,
+  rounds: 100, // matches DEFAULT_HASH_ROUNDS in game config
   gameId: 1n,
   deadSpaceThreshold: 204, // ~80% dead space (204/256)
+  cores: null,
 };
 
+const I64_MAX = 9_223_372_036_854_775_807n;
+const WORKER_URL = new URL("./benchmark-worker.ts", import.meta.url);
+
 // ---------------------------------------------------------------------------
-// Core hash function (matches on-chain compute_planet_hash + iterated rounds)
+// Single-threaded hash (used for sweep mode + single-core benchmark)
 // ---------------------------------------------------------------------------
 
 function computePlanetHashWithDifficulty(
@@ -53,7 +68,6 @@ function computePlanetHashWithDifficulty(
   gameId: bigint,
   rounds: number
 ): Uint8Array {
-  // Initial hash: blake3(x:i64 LE || y:i64 LE || gameId:u64 LE)
   const buf = new ArrayBuffer(24);
   const view = new DataView(buf);
   view.setBigInt64(0, x, true);
@@ -61,112 +75,327 @@ function computePlanetHashWithDifficulty(
   view.setBigUint64(16, gameId, true);
 
   let hash = blake3(new Uint8Array(buf));
-
-  // Iterated rounds: hash_n = blake3(hash_{n-1})
   for (let r = 1; r < rounds; r++) {
     hash = blake3(hash);
   }
-
   return hash;
 }
 
 // ---------------------------------------------------------------------------
-// Scan and benchmark
+// Multithreaded scan via Workers
 // ---------------------------------------------------------------------------
 
-function runBenchmark(config: BenchConfig) {
-  const { mapRadius, rounds, gameId, deadSpaceThreshold } = config;
-  const diameter = 2 * mapRadius + 1;
-  const totalCoords = diameter * diameter;
+function runWorkersAsync(
+  numCores: number,
+  mapRadius: number,
+  rounds: number,
+  gameId: bigint,
+  deadSpaceThreshold: number
+): Promise<{ planetsFound: number; coordsProcessed: number; elapsedMs: number }> {
+  return new Promise((resolve, reject) => {
+    const yStart = -mapRadius;
+    const yEnd = mapRadius;
+    const totalRows = yEnd - yStart + 1;
+    const rowsPerWorker = Math.ceil(totalRows / numCores);
 
-  console.log("=== Encrypted Forest Discovery Benchmark ===\n");
-  console.log(`Map radius:          ${mapRadius} (${diameter}x${diameter} = ${totalCoords.toLocaleString()} coordinates)`);
-  console.log(`Hash rounds:         ${rounds}`);
-  console.log(`Game ID:             ${gameId}`);
-  console.log(`Dead space threshold: ${deadSpaceThreshold}/256 (${((deadSpaceThreshold / 256) * 100).toFixed(1)}% dead space)\n`);
+    let planetsFound = 0;
+    let coordsProcessed = 0;
+    let completed = 0;
+    const workers: Worker[] = [];
 
-  // Estimate on-chain cost
-  const cuPerHash = 2000; // conservative estimate for BLAKE3 on BPF
-  const cuPerVerification = cuPerHash * rounds;
-  const maxCU = 1_400_000;
-  const accountOverhead = 50_000; // account reads, deserialization, etc.
-  const availableCU = maxCU - accountOverhead;
-  const fitsInTx = cuPerVerification <= availableCU;
+    const startTime = performance.now();
 
-  console.log(`--- On-chain verification estimate ---`);
-  console.log(`CU per hash:         ~${cuPerHash}`);
-  console.log(`CU for ${rounds} round(s):   ~${cuPerVerification.toLocaleString()}`);
-  console.log(`Max CU per tx:       ${maxCU.toLocaleString()} (${accountOverhead.toLocaleString()} overhead)`);
-  console.log(`Fits in single tx:   ${fitsInTx ? "YES" : "NO"} (${((cuPerVerification / availableCU) * 100).toFixed(1)}% of budget)`);
-  if (!fitsInTx) {
-    console.log(`  ⚠ Reduce rounds to ≤${Math.floor(availableCU / cuPerHash)} to fit in a single transaction`);
-  }
-  console.log();
+    for (let w = 0; w < numCores; w++) {
+      const workerYStart = yStart + w * rowsPerWorker;
+      const workerYEnd = Math.min(workerYStart + rowsPerWorker - 1, yEnd);
 
-  // Run the scan
+      if (workerYStart > yEnd) {
+        // More cores than rows — skip this worker
+        completed++;
+        if (completed === numCores) {
+          resolve({ planetsFound, coordsProcessed, elapsedMs: performance.now() - startTime });
+        }
+        continue;
+      }
+
+      const task: WorkerTask = {
+        yStart: workerYStart,
+        yEnd: workerYEnd,
+        xStart: -mapRadius,
+        xEnd: mapRadius,
+        rounds,
+        gameId: gameId.toString(),
+        deadSpaceThreshold,
+      };
+
+      const worker = new Worker(WORKER_URL);
+      workers.push(worker);
+
+      worker.onmessage = (event: MessageEvent<WorkerResult>) => {
+        planetsFound += event.data.planetsFound;
+        coordsProcessed += event.data.coordsProcessed;
+        completed++;
+        worker.terminate();
+
+        if (completed === numCores) {
+          const elapsedMs = performance.now() - startTime;
+          resolve({ planetsFound, coordsProcessed, elapsedMs });
+        }
+      };
+
+      worker.onerror = (err) => {
+        workers.forEach((w) => w.terminate());
+        reject(err);
+      };
+
+      worker.postMessage(task);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Single-threaded scan (for cores=1, avoids worker overhead)
+// ---------------------------------------------------------------------------
+
+function runSingleThreaded(
+  mapRadius: number,
+  rounds: number,
+  gameId: bigint,
+  deadSpaceThreshold: number
+): { planetsFound: number; coordsProcessed: number; elapsedMs: number } {
   let planetsFound = 0;
-  let totalHashes = 0;
+  let coordsProcessed = 0;
+
+  const buf = new ArrayBuffer(24);
+  const view = new DataView(buf);
+  const input = new Uint8Array(buf);
+  view.setBigUint64(16, gameId, true);
 
   const startTime = performance.now();
 
   for (let yi = -mapRadius; yi <= mapRadius; yi++) {
+    view.setBigInt64(8, BigInt(yi), true);
     for (let xi = -mapRadius; xi <= mapRadius; xi++) {
-      const hash = computePlanetHashWithDifficulty(
-        BigInt(xi),
-        BigInt(yi),
-        gameId,
-        rounds
-      );
-      totalHashes++;
+      view.setBigInt64(0, BigInt(xi), true);
 
+      let hash = blake3(input);
+      for (let r = 1; r < rounds; r++) {
+        hash = blake3(hash);
+      }
+
+      coordsProcessed++;
       if (hash[0] >= deadSpaceThreshold) {
         planetsFound++;
       }
     }
   }
 
-  const endTime = performance.now();
-  const elapsedMs = endTime - startTime;
-  const elapsedSec = elapsedMs / 1000;
-  const hashesPerSec = totalHashes / elapsedSec;
-  const coordsPerSec = totalCoords / elapsedSec;
-  const msPerCoord = elapsedMs / totalCoords;
-  const blake3Calls = totalHashes * rounds;
-  const blake3PerSec = blake3Calls / elapsedSec;
+  const elapsedMs = performance.now() - startTime;
+  return { planetsFound, coordsProcessed, elapsedMs };
+}
 
-  console.log(`--- Results ---`);
-  console.log(`Total coordinates:   ${totalCoords.toLocaleString()}`);
-  console.log(`Planets found:       ${planetsFound.toLocaleString()} (${((planetsFound / totalCoords) * 100).toFixed(2)}%)`);
-  console.log(`Time elapsed:        ${elapsedMs.toFixed(2)} ms (${elapsedSec.toFixed(3)} s)`);
-  console.log(`Coords/sec:          ${coordsPerSec.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`);
-  console.log(`ms/coord:            ${msPerCoord.toFixed(6)}`);
-  console.log(`BLAKE3 calls total:  ${blake3Calls.toLocaleString()} (${rounds} per coord)`);
-  console.log(`BLAKE3 calls/sec:    ${blake3PerSec.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`);
+// ---------------------------------------------------------------------------
+// Format helpers
+// ---------------------------------------------------------------------------
+
+function fmtTime(ms: number): string {
+  const sec = ms / 1000;
+  if (sec < 1) return `${ms.toFixed(1)} ms`;
+  if (sec < 60) return `${sec.toFixed(2)} s`;
+  if (sec < 3600) return `${(sec / 60).toFixed(1)} min`;
+  if (sec < 86400) return `${(sec / 3600).toFixed(1)} hours`;
+  return `${(sec / 86400).toFixed(1)} days`;
+}
+
+function fmtNum(n: number): string {
+  return n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// ---------------------------------------------------------------------------
+// Print header
+// ---------------------------------------------------------------------------
+
+function printHeader(config: BenchConfig) {
+  const { mapRadius, rounds, gameId, deadSpaceThreshold } = config;
+  const diameter = 2 * mapRadius + 1;
+  const totalCoords = diameter * diameter;
+  const pct =
+    Number((BigInt(mapRadius) * 10_000_000_000n) / I64_MAX) / 100_000_000;
+
+  console.log("=== Encrypted Forest Discovery Benchmark ===\n");
+  console.log(
+    `Map radius:          ${mapRadius} (${diameter}x${diameter} = ${totalCoords.toLocaleString()} coordinates)`
+  );
+  console.log(`Rust i64 max radius: 9,223,372,036,854,775,807 (2^63 - 1)`);
+  console.log(
+    `Using:               ${pct > 0.0001 ? pct.toFixed(8) + "%" : "<0.00000001%"} of coordinate space`
+  );
+  console.log(`Hash rounds:         ${rounds}`);
+  console.log(`Game ID:             ${gameId}`);
+  console.log(
+    `Dead space threshold: ${deadSpaceThreshold}/256 (${((deadSpaceThreshold / 256) * 100).toFixed(1)}% dead space)`
+  );
+  console.log(`System cores:        ${availableParallelism()}`);
   console.log();
 
-  // Project to larger map sizes
-  console.log(`--- Projections (at current speed) ---`);
-  const projections = [100, 500, 1000, 5000, 10000];
+  // On-chain cost estimate
+  const cuPerHash = 2000;
+  const cuPerVerification = cuPerHash * rounds;
+  const maxCU = 1_400_000;
+  const accountOverhead = 50_000;
+  const availableCU = maxCU - accountOverhead;
+  const fitsInTx = cuPerVerification <= availableCU;
+
+  console.log(`--- On-chain verification estimate ---`);
+  console.log(`CU per hash:         ~${cuPerHash}`);
+  console.log(
+    `CU for ${rounds} round(s):   ~${cuPerVerification.toLocaleString()}`
+  );
+  console.log(
+    `Max CU per tx:       ${maxCU.toLocaleString()} (${accountOverhead.toLocaleString()} overhead)`
+  );
+  console.log(
+    `Fits in single tx:   ${fitsInTx ? "YES" : "NO"} (${((cuPerVerification / availableCU) * 100).toFixed(1)}% of budget)`
+  );
+  if (!fitsInTx) {
+    console.log(
+      `  WARNING: Reduce rounds to <=${Math.floor(availableCU / cuPerHash)} to fit in a single transaction`
+    );
+  }
+  console.log();
+}
+
+// ---------------------------------------------------------------------------
+// Print results for one core count
+// ---------------------------------------------------------------------------
+
+function printResults(
+  label: string,
+  totalCoords: number,
+  rounds: number,
+  result: { planetsFound: number; coordsProcessed: number; elapsedMs: number },
+  baselineMs?: number
+) {
+  const { planetsFound, coordsProcessed, elapsedMs } = result;
+  const elapsedSec = elapsedMs / 1000;
+  const coordsPerSec = coordsProcessed / elapsedSec;
+  const msPerCoord = elapsedMs / coordsProcessed;
+  const blake3Calls = coordsProcessed * rounds;
+  const blake3PerSec = blake3Calls / elapsedSec;
+  const speedup = baselineMs ? baselineMs / elapsedMs : undefined;
+
+  console.log(`--- ${label} ---`);
+  console.log(
+    `Planets found:       ${planetsFound.toLocaleString()} (${((planetsFound / totalCoords) * 100).toFixed(2)}%)`
+  );
+  console.log(`Time elapsed:        ${fmtTime(elapsedMs)}`);
+  console.log(`Coords/sec:          ${fmtNum(coordsPerSec)}`);
+  console.log(`ms/coord:            ${msPerCoord.toFixed(6)}`);
+  console.log(
+    `BLAKE3 calls/sec:    ${fmtNum(blake3PerSec)} (${blake3Calls.toLocaleString()} total)`
+  );
+  if (speedup !== undefined) {
+    console.log(`Speedup vs 1 core:   ${speedup.toFixed(2)}x`);
+  }
+  console.log();
+
+  return msPerCoord;
+}
+
+// ---------------------------------------------------------------------------
+// Print projections
+// ---------------------------------------------------------------------------
+
+function printProjections(
+  msPerCoord: number,
+  planetRatio: number,
+  label: string
+) {
+  console.log(`--- Projections (${label}) ---`);
+  const projections = [
+    100, 500, 1_000, 5_000, 10_000, 100_000, 1_000_000, 1_000_000_000,
+  ];
   for (const r of projections) {
     const d = 2 * r + 1;
     const n = d * d;
     const projMs = n * msPerCoord;
-    const projSec = projMs / 1000;
-    const projPlanets = Math.round(n * (planetsFound / totalCoords));
-    let timeStr: string;
-    if (projSec < 1) {
-      timeStr = `${projMs.toFixed(1)} ms`;
-    } else if (projSec < 60) {
-      timeStr = `${projSec.toFixed(2)} s`;
-    } else if (projSec < 3600) {
-      timeStr = `${(projSec / 60).toFixed(1)} min`;
-    } else if (projSec < 86400) {
-      timeStr = `${(projSec / 3600).toFixed(1)} hours`;
-    } else {
-      timeStr = `${(projSec / 86400).toFixed(1)} days`;
-    }
-    console.log(`  radius=${String(r).padStart(5)}: ${n.toLocaleString().padStart(13)} coords → ~${projPlanets.toLocaleString().padStart(10)} planets in ${timeStr}`);
+    const projPlanets = Math.round(n * planetRatio);
+    console.log(
+      `  radius=${String(r).padStart(10)}: ${n.toLocaleString().padStart(22)} coords -> ~${projPlanets.toLocaleString().padStart(19)} planets in ${fmtTime(projMs)}`
+    );
   }
+  console.log();
+}
+
+// ---------------------------------------------------------------------------
+// Main benchmark (single or multi-core)
+// ---------------------------------------------------------------------------
+
+async function runBenchmark(config: BenchConfig) {
+  const { mapRadius, rounds, gameId, deadSpaceThreshold, cores } = config;
+  const diameter = 2 * mapRadius + 1;
+  const totalCoords = diameter * diameter;
+
+  printHeader(config);
+
+  // Determine which core counts to run
+  const sysCores = availableParallelism();
+  const coreCounts: number[] =
+    cores !== null
+      ? [cores]
+      : [1, Math.min(4, sysCores), Math.min(8, sysCores)].filter(
+          (v, i, a) => a.indexOf(v) === i // dedupe if system has < 8 cores
+        );
+
+  let baselineMs: number | undefined;
+  let lastMsPerCoord = 0;
+  let lastPlanetRatio = 0;
+
+  for (const numCores of coreCounts) {
+    const label = `${numCores} core${numCores > 1 ? "s" : ""}`;
+    let result: {
+      planetsFound: number;
+      coordsProcessed: number;
+      elapsedMs: number;
+    };
+
+    if (numCores === 1) {
+      result = runSingleThreaded(
+        mapRadius,
+        rounds,
+        gameId,
+        deadSpaceThreshold
+      );
+    } else {
+      result = await runWorkersAsync(
+        numCores,
+        mapRadius,
+        rounds,
+        gameId,
+        deadSpaceThreshold
+      );
+    }
+
+    lastMsPerCoord = printResults(
+      label,
+      totalCoords,
+      rounds,
+      result,
+      baselineMs
+    );
+    lastPlanetRatio = result.planetsFound / totalCoords;
+
+    if (baselineMs === undefined) {
+      baselineMs = result.elapsedMs;
+    }
+  }
+
+  // Print projections using the fastest run
+  const fastestLabel =
+    coreCounts.length > 1
+      ? `${coreCounts[coreCounts.length - 1]} cores`
+      : `${coreCounts[0]} core${coreCounts[0] > 1 ? "s" : ""}`;
+  printProjections(lastMsPerCoord, lastPlanetRatio, fastestLabel);
 }
 
 // ---------------------------------------------------------------------------
@@ -179,9 +408,13 @@ function runDifficultySweep(config: BenchConfig) {
   const gameId = config.gameId;
 
   console.log("=== Difficulty Sweep ===\n");
-  console.log(`Sample size: ${sampleSize.toLocaleString()} coordinates per round count`);
+  console.log(
+    `Sample size: ${sampleSize.toLocaleString()} coordinates per round count`
+  );
   console.log(`Game ID: ${gameId}\n`);
-  console.log(`${"Rounds".padStart(8)} | ${"Time (ms)".padStart(10)} | ${"ms/coord".padStart(10)} | ${"BLAKE3/s".padStart(12)} | ${"Est CU".padStart(10)} | Fits TX?`);
+  console.log(
+    `${"Rounds".padStart(8)} | ${"Time (ms)".padStart(10)} | ${"ms/coord".padStart(10)} | ${"BLAKE3/s".padStart(12)} | ${"Est CU".padStart(10)} | Fits TX?`
+  );
   console.log("-".repeat(78));
 
   const cuPerHash = 2000;
@@ -190,7 +423,12 @@ function runDifficultySweep(config: BenchConfig) {
   for (const rounds of roundsList) {
     const start = performance.now();
     for (let i = 0; i < sampleSize; i++) {
-      computePlanetHashWithDifficulty(BigInt(i), BigInt(i >> 8), gameId, rounds);
+      computePlanetHashWithDifficulty(
+        BigInt(i),
+        BigInt(i >> 8),
+        gameId,
+        rounds
+      );
     }
     const elapsed = performance.now() - start;
     const msPerCoord = elapsed / sampleSize;
@@ -199,12 +437,14 @@ function runDifficultySweep(config: BenchConfig) {
     const fits = estCU <= maxAvailable;
 
     console.log(
-      `${String(rounds).padStart(8)} | ${elapsed.toFixed(2).padStart(10)} | ${msPerCoord.toFixed(6).padStart(10)} | ${blake3PerSec.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",").padStart(12)} | ${estCU.toLocaleString().padStart(10)} | ${fits ? "YES" : "NO "} (${((estCU / maxAvailable) * 100).toFixed(0)}%)`
+      `${String(rounds).padStart(8)} | ${elapsed.toFixed(2).padStart(10)} | ${msPerCoord.toFixed(6).padStart(10)} | ${fmtNum(blake3PerSec).padStart(12)} | ${estCU.toLocaleString().padStart(10)} | ${fits ? "YES" : "NO "} (${((estCU / maxAvailable) * 100).toFixed(0)}%)`
     );
   }
 
   console.log();
-  console.log(`Max safe rounds for on-chain verification: ~${Math.floor(maxAvailable / cuPerHash)}`);
+  console.log(
+    `Max safe rounds for on-chain verification: ~${Math.floor(maxAvailable / cuPerHash)}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +474,10 @@ function parseArgs(): { config: BenchConfig; sweep: boolean } {
       case "-t":
         config.deadSpaceThreshold = parseInt(args[++i], 10);
         break;
+      case "--cores":
+      case "-c":
+        config.cores = parseInt(args[++i], 10);
+        break;
       case "--sweep":
         sweep = true;
         break;
@@ -247,12 +491,14 @@ Options:
   -r, --rounds <N>     Hash difficulty rounds (default: ${defaults.rounds})
   -g, --gameId <N>     Game ID (default: ${defaults.gameId})
   -t, --threshold <N>  Dead space threshold 0-255 (default: ${defaults.deadSpaceThreshold})
+  -c, --cores <N>      Worker thread count (default: compare 1/4/8)
   --sweep              Run difficulty sweep instead of single benchmark
   -h, --help           Show this help
 
 Examples:
-  bun run scripts/benchmark-discovery.ts                   # Default: 101x101, 1 round
+  bun run scripts/benchmark-discovery.ts                   # Compare 1/4/8 cores, 101x101
   bun run scripts/benchmark-discovery.ts -s 500 -r 10      # 1001x1001, 10 rounds
+  bun run scripts/benchmark-discovery.ts -c 16 -s 1000     # 16 cores, 2001x2001
   bun run scripts/benchmark-discovery.ts --sweep            # Sweep 1-1000 rounds
 `);
         process.exit(0);
@@ -271,5 +517,5 @@ const { config, sweep } = parseArgs();
 if (sweep) {
   runDifficultySweep(config);
 } else {
-  runBenchmark(config);
+  await runBenchmark(config);
 }

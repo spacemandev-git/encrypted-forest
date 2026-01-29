@@ -1,69 +1,69 @@
 /**
- * EncryptedPendingMoves account fetching and deserialization.
+ * PendingMovesMetadata account fetching and deserialization.
  */
 
 import { type Program } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 import type {
-  EncryptedPendingMoves,
-  EncryptedPendingMove,
+  PendingMovesMetadata,
+  PendingMoveEntry,
 } from "../types/pendingMoves.js";
 import { derivePendingMovesPDA } from "../utils/pda.js";
 
 /**
- * Convert Anchor's deserialized EncryptedPendingMove to our SDK type.
+ * Convert Anchor's deserialized PendingMoveEntry to our SDK type.
  */
-function convertEncryptedPendingMove(raw: any): EncryptedPendingMove {
+function convertPendingMoveEntry(raw: any): PendingMoveEntry {
   return {
-    active: raw.active,
     landingSlot: BigInt(raw.landingSlot.toString()),
-    encPubkey: new Uint8Array(raw.encPubkey),
-    encNonce: new Uint8Array(raw.encNonce),
-    encCiphertexts: (raw.encCiphertexts as any[]).map(
-      (ct: any) => new Uint8Array(ct)
-    ),
+    moveId: BigInt(raw.moveId.toString()),
   };
 }
 
 /**
- * Convert Anchor's deserialized EncryptedPendingMoves account to our SDK type.
+ * Convert Anchor's deserialized PendingMovesMetadata account to our SDK type.
  */
-function convertEncryptedPendingMoves(raw: any): EncryptedPendingMoves {
+function convertPendingMovesMetadata(raw: any): PendingMovesMetadata {
   return {
     gameId: BigInt(raw.gameId.toString()),
     planetHash: new Uint8Array(raw.planetHash),
+    nextMoveId: BigInt(raw.nextMoveId.toString()),
     moveCount: raw.moveCount,
-    moves: (raw.moves as any[]).map(convertEncryptedPendingMove),
+    queuedCount: raw.queuedCount,
+    queuedLandingSlots: (raw.queuedLandingSlots as any[]).map(
+      (s: any) => BigInt(s.toString())
+    ),
+    moves: (raw.moves as any[]).map(convertPendingMoveEntry),
   };
 }
 
 /**
- * Fetch and deserialize an EncryptedPendingMoves account by PDA.
+ * Fetch and deserialize a PendingMovesMetadata account by PDA.
  */
-export async function fetchEncryptedPendingMoves(
+export async function fetchPendingMovesMetadata(
   program: Program,
   gameId: bigint,
   planetHash: Uint8Array,
   programId?: PublicKey
-): Promise<EncryptedPendingMoves> {
+): Promise<PendingMovesMetadata> {
   const [pda] = derivePendingMovesPDA(
     gameId,
     planetHash,
     programId ?? program.programId
   );
-  const raw = await (program.account as any).encryptedPendingMoves.fetch(pda);
-  return convertEncryptedPendingMoves(raw);
+  const raw = await (program.account as any).pendingMovesMetadata.fetch(pda);
+  return convertPendingMovesMetadata(raw);
 }
 
 /**
- * Fetch an EncryptedPendingMoves account by a known address.
+ * Fetch a PendingMovesMetadata account by a known address.
  */
-export async function fetchEncryptedPendingMovesByAddress(
+export async function fetchPendingMovesMetadataByAddress(
   program: Program,
   address: PublicKey
-): Promise<EncryptedPendingMoves> {
-  const raw = await (program.account as any).encryptedPendingMoves.fetch(
+): Promise<PendingMovesMetadata> {
+  const raw = await (program.account as any).pendingMovesMetadata.fetch(
     address
   );
-  return convertEncryptedPendingMoves(raw);
+  return convertPendingMovesMetadata(raw);
 }

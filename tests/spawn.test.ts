@@ -189,7 +189,7 @@ describe("Queue Init Planet", () => {
     const coord = findPlanetOfType(gameId, DEFAULT_THRESHOLDS, CelestialBodyType.Planet, 2);
 
     const { computationOffset, planetPDA, pendingMovesPDA } = await queueInitPlanet(
-      program, admin, gameId, coord.x, coord.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, coord.x, coord.y, encCtx
     );
 
     const finalizeSig = await awaitComputationFinalization(
@@ -200,14 +200,14 @@ describe("Queue Init Planet", () => {
     // Verify EncryptedCelestialBody account
     const body = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(body.planetHash).toEqual(Array.from(coord.hash));
-    expect(body.encCiphertexts.length).toBe(19);
+    expect(body.staticEncCiphertexts.length).toBe(12);
+    expect(body.dynamicEncCiphertexts.length).toBe(4);
     expect(Number(body.lastUpdatedSlot)).toBeGreaterThan(0);
 
-    // Verify EncryptedPendingMoves account
-    const pending = await program.account.encryptedPendingMoves.fetch(pendingMovesPDA);
+    // Verify PendingMovesMetadata account
+    const pending = await program.account.pendingMovesMetadata.fetch(pendingMovesPDA);
     expect(pending.gameId.toString()).toBe(gameId.toString());
     expect(pending.planetHash).toEqual(Array.from(coord.hash));
-    expect(pending.moveCount).toBe(0);
     expect(pending.moves.length).toBe(0);
   });
 
@@ -225,7 +225,7 @@ describe("Queue Init Planet", () => {
     const [expectedPendingPDA] = derivePendingMovesPDA(gameId, coord.hash, program.programId);
 
     const { planetPDA, pendingMovesPDA } = await queueInitPlanet(
-      program, admin, gameId, coord.x, coord.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, coord.x, coord.y, encCtx
     );
 
     expect(planetPDA.toString()).toBe(expectedPlanetPDA.toString());
@@ -272,7 +272,7 @@ describe("Queue Init Spawn Planet", () => {
     const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
 
     const { computationOffset, playerPDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn.x, spawn.y, 0n, 0n, encCtx
     );
 
     await awaitComputationFinalization(
@@ -296,7 +296,7 @@ describe("Queue Init Spawn Planet", () => {
     // First spawn
     const spawn1 = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
     const { computationOffset: co1 } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn1.x, spawn1.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn1.x, spawn1.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, co1, program.programId, "confirmed");
 
@@ -307,7 +307,7 @@ describe("Queue Init Spawn Planet", () => {
       if (spawn2.x !== spawn1.x || spawn2.y !== spawn1.y) {
         await expect(
           queueInitSpawnPlanet(
-            program, admin, gameId, spawn2.x, spawn2.y, DEFAULT_THRESHOLDS, encCtx
+            program, admin, gameId, spawn2.x, spawn2.y, 0n, 0n, encCtx
           )
         ).rejects.toThrow();
       }
@@ -331,7 +331,7 @@ describe("Queue Init Spawn Planet", () => {
     // Should fail because player PDA does not exist
     await expect(
       queueInitSpawnPlanet(
-        program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx
+        program, admin, gameId, spawn.x, spawn.y, 0n, 0n, encCtx
       )
     ).rejects.toThrow();
   });
@@ -359,14 +359,14 @@ describe("Queue Init Spawn Planet", () => {
 
     // Player 1 spawns
     const { computationOffset: co1, playerPDA: p1PDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn1.x, spawn1.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn1.x, spawn1.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, co1, program.programId, "confirmed");
 
     // Player 2 spawns at different location
     if (spawn2.x !== spawn1.x || spawn2.y !== spawn1.y) {
       const { computationOffset: co2, playerPDA: p2PDA } = await queueInitSpawnPlanet(
-        program, player2, gameId, spawn2.x, spawn2.y, DEFAULT_THRESHOLDS, encCtx2
+        program, player2, gameId, spawn2.x, spawn2.y, 0n, 0n, encCtx2
       );
       await awaitComputationFinalization(provider, co2, program.programId, "confirmed");
 

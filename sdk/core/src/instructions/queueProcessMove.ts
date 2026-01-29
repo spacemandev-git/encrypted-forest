@@ -2,17 +2,17 @@
  * Instruction builder: queue_process_move
  *
  * Queues an Arcium process_move computation to send ships from a source
- * planet to a target planet. The computation validates ownership,
- * deducts ships/metal from source, and creates a pending move on target.
+ * planet to a target planet.
  *
- * state_cts (19 * 32 = 608 bytes): Current encrypted planet state of the source.
- * move_cts (13 * 32 = 416 bytes):
- *   0-3: player_key parts (u64 x4)
- *   4: ships_to_send (u64), 5: metal_to_send (u64),
- *   6: source_x (u64), 7: source_y (u64),
- *   8: target_x (u64), 9: target_y (u64),
- *   10: current_slot (u64), 11: game_speed (u64),
- *   12: last_updated_slot (u64)
+ * Planet state (static + dynamic) is read by MPC nodes directly from the
+ * source_body account via .account() -- NOT passed as ciphertexts.
+ *
+ * Encrypted input: Enc<Shared, ProcessMoveInput> = 11 ciphertexts:
+ *   player_id, source_planet_id, ships_to_send, metal_to_send,
+ *   source_x, source_y, target_x, target_y,
+ *   current_slot, game_speed, last_updated_slot
+ *
+ * landing_slot is a public parameter validated by the circuit.
  */
 
 import { type Program, BN } from "@coral-xyz/anchor";
@@ -23,23 +23,21 @@ import type { ArciumAccounts } from "./arciumAccounts.js";
 export interface QueueProcessMoveArgs {
   gameId: bigint;
   computationOffset: bigint;
-  /** Source planet encrypted state (19 * 32 bytes) */
-  stateCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the state ciphertexts */
-  statePubkey: Uint8Array;
-  /** Nonce used for the state ciphertexts (u128) */
-  stateNonce: bigint;
-  /** Move input ciphertexts (13 * 32 bytes) */
+  /** Public landing slot (validated by MPC) */
+  landingSlot: bigint;
+  /** 11 ciphertexts packed as Vec<u8> (11 * 32 = 352 bytes) */
   moveCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the move ciphertexts */
+  /** x25519 pubkey for Enc<Shared, ProcessMoveInput> */
   movePubkey: Uint8Array;
-  /** Nonce used for the move ciphertexts (u128) */
+  /** Nonce for the move encryption (u128) */
   moveNonce: bigint;
   /** Observer x25519 public key */
   observerPubkey: Uint8Array;
   /** Source celestial body account address */
   sourceBody: PublicKey;
-  /** Target pending moves account address */
+  /** Source planet's pending moves metadata (read-only, for flush check) */
+  sourcePending: PublicKey;
+  /** Target planet's pending moves metadata (mut, for adding move entry) */
   targetPending: PublicKey;
 }
 
@@ -57,9 +55,7 @@ export function buildQueueProcessMoveIx(
   return program.methods
     .queueProcessMove(
       new BN(args.computationOffset.toString()),
-      Buffer.from(args.stateCts),
-      Array.from(args.statePubkey) as any,
-      new BN(args.stateNonce.toString()),
+      new BN(args.landingSlot.toString()),
       Buffer.from(args.moveCts),
       Array.from(args.movePubkey) as any,
       new BN(args.moveNonce.toString()),
@@ -69,6 +65,7 @@ export function buildQueueProcessMoveIx(
       payer,
       game: gamePDA,
       sourceBody: args.sourceBody,
+      sourcePending: args.sourcePending,
       targetPending: args.targetPending,
       signPdaAccount: arciumAccounts.signPdaAccount,
       mxeAccount: arciumAccounts.mxeAccount,

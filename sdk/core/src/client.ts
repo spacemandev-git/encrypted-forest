@@ -6,8 +6,8 @@
  * - Exploration (client-side hash-based noise scanning)
  * - Actions (queue init planet, queue init spawn planet, queue process move,
  *   queue flush planet, queue upgrade planet, broadcast)
- * - Data fetching (game, player, encrypted celestial body, encrypted pending moves)
- * - Decryption (planet state, pending move data)
+ * - Data fetching (game, player, encrypted celestial body, pending moves metadata)
+ * - Decryption (planet static/dynamic state, pending move data)
  * - Subscriptions (account changes, log events)
  */
 
@@ -21,13 +21,14 @@ import type { Game, NoiseThresholds } from "./types/game.js";
 import type { Player } from "./types/player.js";
 import type { EncryptedCelestialBodyAccount } from "./types/celestialBody.js";
 import { CelestialBodyType } from "./types/celestialBody.js";
-import type { EncryptedPendingMoves } from "./types/pendingMoves.js";
+import type { PendingMovesMetadata } from "./types/pendingMoves.js";
 import {
   PROGRAM_ID,
   deriveGamePDA,
   derivePlayerPDA,
   deriveCelestialBodyPDA,
   derivePendingMovesPDA,
+  derivePendingMoveAccountPDA,
 } from "./utils/pda.js";
 import {
   computePlanetHash,
@@ -54,12 +55,14 @@ import {
 } from "./crypto/fog.js";
 import { derivePlanetKeySeed, verifyPlanetHash } from "./crypto/planetKey.js";
 import {
+  decryptPlanetStatic,
+  decryptPlanetDynamic,
   decryptPlanetState,
   decryptPendingMoveData,
   derivePlanetPublicKey,
   computeSharedSecret,
-  pubkeyFromParts,
-  pubkeyToParts,
+  type PlanetStaticState,
+  type PlanetDynamicState,
   type PlanetState,
   type PendingMoveData,
 } from "./crypto/planetCipher.js";
@@ -70,8 +73,8 @@ import {
   fetchEncryptedCelestialBodyByAddress,
 } from "./accounts/celestialBody.js";
 import {
-  fetchEncryptedPendingMoves,
-  fetchEncryptedPendingMovesByAddress,
+  fetchPendingMovesMetadata,
+  fetchPendingMovesMetadataByAddress,
 } from "./accounts/pendingMoves.js";
 import {
   buildCreateGameIx,
@@ -170,6 +173,14 @@ export class EncryptedForestClient {
     return derivePendingMovesPDA(gameId, planetHash, this.programId);
   }
 
+  derivePendingMoveAccountPDA(
+    gameId: bigint,
+    planetHash: Uint8Array,
+    moveId: bigint
+  ): [PublicKey, number] {
+    return derivePendingMoveAccountPDA(gameId, planetHash, moveId, this.programId);
+  }
+
   // -------------------------------------------------------------------------
   // Account fetching
   // -------------------------------------------------------------------------
@@ -208,11 +219,11 @@ export class EncryptedForestClient {
     return fetchEncryptedCelestialBodyByAddress(this.program, address);
   }
 
-  async getEncryptedPendingMoves(
+  async getPendingMovesMetadata(
     gameId: bigint,
     planetHash: Uint8Array
-  ): Promise<EncryptedPendingMoves> {
-    return fetchEncryptedPendingMoves(
+  ): Promise<PendingMovesMetadata> {
+    return fetchPendingMovesMetadata(
       this.program,
       gameId,
       planetHash,
@@ -220,10 +231,10 @@ export class EncryptedForestClient {
     );
   }
 
-  async getEncryptedPendingMovesByAddress(
+  async getPendingMovesMetadataByAddress(
     address: PublicKey
-  ): Promise<EncryptedPendingMoves> {
-    return fetchEncryptedPendingMovesByAddress(this.program, address);
+  ): Promise<PendingMovesMetadata> {
+    return fetchPendingMovesMetadataByAddress(this.program, address);
   }
 
   // -------------------------------------------------------------------------
@@ -231,33 +242,42 @@ export class EncryptedForestClient {
   // -------------------------------------------------------------------------
 
   /**
-   * Decrypt an encrypted celestial body account into plaintext PlanetState.
-   * Requires knowing the planet_hash (which comes from knowing x, y, gameId).
+   * Decrypt both static and dynamic sections of an encrypted celestial body.
    */
   decryptPlanetState(
     planetHash: Uint8Array,
     encAccount: EncryptedCelestialBodyAccount
   ): PlanetState {
-    return decryptPlanetState(
+    return decryptPlanetState(planetHash, encAccount);
+  }
+
+  /**
+   * Decrypt only the static section of a celestial body.
+   */
+  decryptPlanetStatic(
+    planetHash: Uint8Array,
+    encAccount: EncryptedCelestialBodyAccount
+  ): PlanetStaticState {
+    return decryptPlanetStatic(
       planetHash,
-      encAccount.encPubkey,
-      encAccount.encNonce,
-      encAccount.encCiphertexts
+      encAccount.staticEncPubkey,
+      encAccount.staticEncNonce,
+      encAccount.staticEncCiphertexts
     );
   }
 
   /**
-   * Decrypt a single encrypted pending move into plaintext PendingMoveData.
+   * Decrypt only the dynamic section of a celestial body.
    */
-  decryptPendingMoveData(
+  decryptPlanetDynamic(
     planetHash: Uint8Array,
-    encMove: { encPubkey: Uint8Array; encNonce: Uint8Array; encCiphertexts: Uint8Array[] }
-  ): PendingMoveData {
-    return decryptPendingMoveData(
+    encAccount: EncryptedCelestialBodyAccount
+  ): PlanetDynamicState {
+    return decryptPlanetDynamic(
       planetHash,
-      encMove.encPubkey,
-      encMove.encNonce,
-      encMove.encCiphertexts
+      encAccount.dynamicEncPubkey,
+      encAccount.dynamicEncNonce,
+      encAccount.dynamicEncCiphertexts
     );
   }
 
@@ -366,9 +386,6 @@ export class EncryptedForestClient {
   // Exploration (client-side hash-based noise)
   // -------------------------------------------------------------------------
 
-  /**
-   * Scan a single coordinate.
-   */
   scanCoordinate(
     x: bigint,
     y: bigint,
@@ -378,9 +395,6 @@ export class EncryptedForestClient {
     return scanCoordinate(x, y, gameId, thresholds);
   }
 
-  /**
-   * Scan a rectangular range.
-   */
   scanRange(
     startX: bigint,
     startY: bigint,
@@ -392,9 +406,6 @@ export class EncryptedForestClient {
     return scanRange(startX, startY, endX, endY, gameId, thresholds);
   }
 
-  /**
-   * Discover a coordinate (scan + derive key).
-   */
   discoverCoordinate(
     x: bigint,
     y: bigint,
@@ -404,9 +415,6 @@ export class EncryptedForestClient {
     return discoverCoordinate(x, y, gameId, thresholds);
   }
 
-  /**
-   * Discover a range (scan + derive keys).
-   */
   discoverRange(
     startX: bigint,
     startY: bigint,
@@ -418,9 +426,6 @@ export class EncryptedForestClient {
     return discoverRange(startX, startY, endX, endY, gameId, thresholds);
   }
 
-  /**
-   * Reveal a planet from broadcast coordinates.
-   */
   revealPlanet(
     x: bigint,
     y: bigint,
@@ -431,9 +436,6 @@ export class EncryptedForestClient {
     return revealPlanet(x, y, gameId, thresholds, expectedHash);
   }
 
-  /**
-   * Find a valid spawn planet.
-   */
   findSpawnPlanet(
     gameId: bigint,
     thresholds: NoiseThresholds,
@@ -443,9 +445,6 @@ export class EncryptedForestClient {
     return findSpawnPlanet(gameId, thresholds, mapDiameter, maxAttempts);
   }
 
-  /**
-   * Find a planet of a specific type.
-   */
   findPlanetOfType(
     gameId: bigint,
     thresholds: NoiseThresholds,
@@ -547,12 +546,12 @@ export class EncryptedForestClient {
   // Crypto helpers
   // -------------------------------------------------------------------------
 
-  computePlanetHash(x: bigint, y: bigint, gameId: bigint): Uint8Array {
-    return computePlanetHash(x, y, gameId);
+  computePlanetHash(x: bigint, y: bigint, gameId: bigint, rounds: number = 1): Uint8Array {
+    return computePlanetHash(x, y, gameId, rounds);
   }
 
-  derivePlanetKeySeed(x: bigint, y: bigint, gameId: bigint): Uint8Array {
-    return derivePlanetKeySeed(x, y, gameId);
+  derivePlanetKeySeed(x: bigint, y: bigint, gameId: bigint, rounds: number = 1): Uint8Array {
+    return derivePlanetKeySeed(x, y, gameId, rounds);
   }
 
   verifyPlanetHash(
@@ -573,21 +572,6 @@ export class EncryptedForestClient {
     mxePublicKey: Uint8Array
   ): Uint8Array {
     return computeSharedSecret(planetHash, mxePublicKey);
-  }
-
-  pubkeyFromParts(
-    p0: bigint,
-    p1: bigint,
-    p2: bigint,
-    p3: bigint
-  ): Uint8Array {
-    return pubkeyFromParts(p0, p1, p2, p3);
-  }
-
-  pubkeyToParts(
-    pubkey: Uint8Array
-  ): [bigint, bigint, bigint, bigint] {
-    return pubkeyToParts(pubkey);
   }
 
   // -------------------------------------------------------------------------

@@ -15,7 +15,6 @@ import type { EncryptedCelestialBodyAccount } from "@encrypted-forest/core";
 import {
   fetchEncryptedCelestialBody,
   decryptPlanetState,
-  pubkeyFromParts,
 } from "@encrypted-forest/core";
 import type { PlanetState } from "@encrypted-forest/core";
 import {
@@ -40,14 +39,25 @@ export interface PlanetEntry {
 }
 
 /**
- * Compare two Uint8Array values for equality.
+ * Serialize an array of Uint8Array ciphertexts to a flat number[] for IndexedDB.
  */
-function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
+function serializeCiphertexts(cts: Uint8Array[]): number[] {
+  const result: number[] = [];
+  for (const ct of cts) {
+    result.push(...Array.from(ct));
   }
-  return true;
+  return result;
+}
+
+/**
+ * Deserialize a flat number[] back into an array of Uint8Array ciphertexts.
+ */
+function deserializeCiphertexts(flat: number[], chunkSize: number): Uint8Array[] {
+  const result: Uint8Array[] = [];
+  for (let i = 0; i < flat.length; i += chunkSize) {
+    result.push(new Uint8Array(flat.slice(i, i + chunkSize)));
+  }
+  return result;
 }
 
 export class PlanetsStore {
@@ -65,18 +75,12 @@ export class PlanetsStore {
   /** All planet entries as an array */
   all = $derived([...this.planets.values()]);
 
-  /** Planets owned by a specific owner (passed as raw pubkey bytes) */
+  /** Planets owned by a specific owner (passed as ownerId bigint) */
   ownedBy = $derived.by(() => {
-    return (ownerBytes: Uint8Array): PlanetEntry[] => {
+    return (ownerId: bigint): PlanetEntry[] => {
       return this.all.filter((p) => {
-        if (!p.decrypted || p.decrypted.ownerExists === 0) return false;
-        const ownerKey = pubkeyFromParts(
-          p.decrypted.owner0,
-          p.decrypted.owner1,
-          p.decrypted.owner2,
-          p.decrypted.owner3
-        );
-        return arraysEqual(ownerKey, ownerBytes);
+        if (!p.decrypted || p.decrypted.dynamic.ownerExists === 0) return false;
+        return p.decrypted.dynamic.ownerId === ownerId;
       });
     };
   });
@@ -121,19 +125,23 @@ export class PlanetsStore {
       };
 
       // If we have cached encrypted data, restore it and attempt decryption
-      if (p.encNonce && p.encCiphertexts) {
+      if (p.staticEncNonce && p.staticEncCiphertexts && p.dynamicEncNonce && p.dynamicEncCiphertexts) {
         try {
           const cachedEncrypted: EncryptedCelestialBodyAccount = {
-            pubkey: p.encPubkey ? new Uint8Array(p.encPubkey) : this.#mxePublicKey,
-            nonce: new Uint8Array(p.encNonce),
-            ciphertexts: new Uint8Array(p.encCiphertexts),
+            planetHash: new Uint8Array(p.hash),
+            lastUpdatedSlot: 0n,
+            lastFlushedSlot: 0n,
+            staticEncPubkey: p.staticEncPubkey ? new Uint8Array(p.staticEncPubkey) : this.#mxePublicKey,
+            staticEncNonce: new Uint8Array(p.staticEncNonce),
+            staticEncCiphertexts: deserializeCiphertexts(p.staticEncCiphertexts, 32),
+            dynamicEncPubkey: p.dynamicEncPubkey ? new Uint8Array(p.dynamicEncPubkey) : this.#mxePublicKey,
+            dynamicEncNonce: new Uint8Array(p.dynamicEncNonce),
+            dynamicEncCiphertexts: deserializeCiphertexts(p.dynamicEncCiphertexts, 32),
           };
           entry.encrypted = cachedEncrypted;
           entry.decrypted = decryptPlanetState(
             entry.discovery.hash,
-            cachedEncrypted.pubkey,
-            cachedEncrypted.nonce,
-            cachedEncrypted.ciphertexts
+            cachedEncrypted
           );
         } catch {
           // Cached encrypted data may be stale; will re-fetch from chain
@@ -260,9 +268,12 @@ export class PlanetsStore {
 
     // Persist encrypted account data if available
     if (entry.encrypted) {
-      persisted.encPubkey = Array.from(entry.encrypted.pubkey);
-      persisted.encNonce = Array.from(entry.encrypted.nonce);
-      persisted.encCiphertexts = Array.from(entry.encrypted.ciphertexts);
+      persisted.staticEncPubkey = Array.from(entry.encrypted.staticEncPubkey);
+      persisted.staticEncNonce = Array.from(entry.encrypted.staticEncNonce);
+      persisted.staticEncCiphertexts = serializeCiphertexts(entry.encrypted.staticEncCiphertexts);
+      persisted.dynamicEncPubkey = Array.from(entry.encrypted.dynamicEncPubkey);
+      persisted.dynamicEncNonce = Array.from(entry.encrypted.dynamicEncNonce);
+      persisted.dynamicEncCiphertexts = serializeCiphertexts(entry.encrypted.dynamicEncCiphertexts);
     }
 
     await persistPlanet(persisted);
@@ -285,9 +296,7 @@ export class PlanetsStore {
       try {
         decrypted = decryptPlanetState(
           entry.discovery.hash,
-          encAccount.pubkey,
-          encAccount.nonce,
-          encAccount.ciphertexts
+          encAccount
         );
       } catch {
         // Decryption may fail if key material is wrong or data is corrupted

@@ -34,7 +34,6 @@ import {
   awaitComputationFinalization,
   getArciumEnv,
   UpgradeFocus,
-  DEFAULT_THRESHOLDS,
   EncryptionContext,
 } from "./helpers";
 
@@ -142,9 +141,9 @@ describe("Queue Upgrade Planet", () => {
     await initPlayer(program, admin, gameId);
 
     // Spawn to own a planet
-    const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
+    const spawn = findSpawnPlanet(gameId, defaultGameConfig(gameId).noiseThresholds);
     const { computationOffset: spawnCO, planetPDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn.x, spawn.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -153,20 +152,16 @@ describe("Queue Upgrade Planet", () => {
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
 
     const upgradeValues = buildUpgradePlanetValues(
-      admin.publicKey,
+      1n,
       UpgradeFocus.Range,
       currentSlot,
       10000n,
-      BigInt(bodyBefore.lastUpdatedSlot.toString())
+      BigInt(bodyBefore.lastUpdatedSlot.toString()),
+      upgradeCost(1)
     );
 
     const { computationOffset: upgradeCO } = await queueUpgradePlanet(
       program, admin, gameId, planetPDA,
-      {
-        encPubkey: bodyBefore.encPubkey as any,
-        encNonce: bodyBefore.encNonce as any,
-        encCiphertexts: bodyBefore.encCiphertexts as any,
-      },
       upgradeValues, encCtx
     );
 
@@ -181,11 +176,18 @@ describe("Queue Upgrade Planet", () => {
     );
 
     // State should have changed (level increased, stats doubled)
-    const ctsBefore = bodyBefore.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const ctsAfter = bodyAfter.encCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const nonceBefore = Buffer.from(bodyBefore.encNonce as any).toString("hex");
-    const nonceAfter = Buffer.from(bodyAfter.encNonce as any).toString("hex");
-    expect(nonceBefore + ctsBefore).not.toBe(nonceAfter + ctsAfter);
+    const staticCtsBefore = bodyBefore.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticCtsAfter = bodyAfter.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const dynamicCtsBefore = bodyBefore.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const dynamicCtsAfter = bodyAfter.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const staticNonceBefore = Buffer.from(bodyBefore.staticEncNonce as any).toString("hex");
+    const staticNonceAfter = Buffer.from(bodyAfter.staticEncNonce as any).toString("hex");
+    const dynamicNonceBefore = Buffer.from(bodyBefore.dynamicEncNonce as any).toString("hex");
+    const dynamicNonceAfter = Buffer.from(bodyAfter.dynamicEncNonce as any).toString("hex");
+    // At least one of static or dynamic encrypted state should have changed
+    const beforeFingerprint = staticNonceBefore + staticCtsBefore + dynamicNonceBefore + dynamicCtsBefore;
+    const afterFingerprint = staticNonceAfter + staticCtsAfter + dynamicNonceAfter + dynamicCtsAfter;
+    expect(beforeFingerprint).not.toBe(afterFingerprint);
   });
 
   it("queues upgrade with LaunchVelocity focus", async () => {
@@ -198,9 +200,9 @@ describe("Queue Upgrade Planet", () => {
     await createGame(program, admin, defaultGameConfig(gameId));
     await initPlayer(program, admin, gameId);
 
-    const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
+    const spawn = findSpawnPlanet(gameId, defaultGameConfig(gameId).noiseThresholds);
     const { computationOffset: spawnCO, planetPDA } = await queueInitSpawnPlanet(
-      program, admin, gameId, spawn.x, spawn.y, DEFAULT_THRESHOLDS, encCtx
+      program, admin, gameId, spawn.x, spawn.y, 0n, 0n, encCtx
     );
     await awaitComputationFinalization(provider, spawnCO, program.programId, "confirmed");
 
@@ -208,20 +210,16 @@ describe("Queue Upgrade Planet", () => {
     const currentSlot = BigInt(await provider.connection.getSlot("confirmed"));
 
     const upgradeValues = buildUpgradePlanetValues(
-      admin.publicKey,
+      1n,
       UpgradeFocus.LaunchVelocity,
       currentSlot,
       10000n,
-      BigInt(bodyBefore.lastUpdatedSlot.toString())
+      BigInt(bodyBefore.lastUpdatedSlot.toString()),
+      upgradeCost(1)
     );
 
     const { computationOffset: upgradeCO } = await queueUpgradePlanet(
       program, admin, gameId, planetPDA,
-      {
-        encPubkey: bodyBefore.encPubkey as any,
-        encNonce: bodyBefore.encNonce as any,
-        encCiphertexts: bodyBefore.encCiphertexts as any,
-      },
       upgradeValues, encCtx
     );
 

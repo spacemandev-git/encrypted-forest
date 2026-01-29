@@ -17,28 +17,34 @@ export type {
   WinConditionAnchor,
   NoiseThresholds,
 } from "./types/game.js";
-export { DEFAULT_THRESHOLDS } from "./types/game.js";
+export { DEFAULT_THRESHOLDS, DEFAULT_HASH_ROUNDS } from "./types/game.js";
 
 export type {
   CelestialBody,
   CelestialBodyProperties,
   CelestialBodyStats,
   EncryptedCelestialBodyAccount,
-  EncryptedPendingMoveAccount,
 } from "./types/celestialBody.js";
 export {
   CelestialBodyType,
   CometBoost,
   UpgradeFocus,
+  PLANET_STATIC_FIELDS,
+  PLANET_DYNAMIC_FIELDS,
 } from "./types/celestialBody.js";
 
 export type { Player } from "./types/player.js";
 
 export type {
-  EncryptedPendingMoves,
-  EncryptedPendingMove,
+  PendingMoveEntry,
+  PendingMovesMetadata,
+  PendingMoveAccount,
 } from "./types/pendingMoves.js";
-export { MAX_PENDING_MOVES } from "./types/pendingMoves.js";
+export {
+  PENDING_MOVE_DATA_FIELDS,
+  MAX_FLUSH_BATCH,
+  MAX_QUEUED_CALLBACKS,
+} from "./types/pendingMoves.js";
 
 export type {
   InitPlanetEvent,
@@ -59,6 +65,7 @@ export {
   derivePlayerPDA,
   deriveCelestialBodyPDA,
   derivePendingMovesPDA,
+  derivePendingMoveAccountPDA,
 } from "./utils/pda.js";
 
 // ---------------------------------------------------------------------------
@@ -100,12 +107,17 @@ export {
   computeSharedSecret,
   encryptFieldElement,
   decryptFieldElement,
+  decryptPlanetStatic,
+  decryptPlanetDynamic,
   decryptPlanetState,
   decryptPendingMoveData,
-  pubkeyFromParts,
-  pubkeyToParts,
 } from "./crypto/planetCipher.js";
-export type { PlanetState, PendingMoveData } from "./crypto/planetCipher.js";
+export type {
+  PlanetStaticState,
+  PlanetDynamicState,
+  PlanetState,
+  PendingMoveData,
+} from "./crypto/planetCipher.js";
 
 // ---------------------------------------------------------------------------
 // Accounts
@@ -118,8 +130,8 @@ export {
   fetchEncryptedCelestialBodyByAddress,
 } from "./accounts/celestialBody.js";
 export {
-  fetchEncryptedPendingMoves,
-  fetchEncryptedPendingMovesByAddress,
+  fetchPendingMovesMetadata,
+  fetchPendingMovesMetadataByAddress,
 } from "./accounts/pendingMoves.js";
 
 // ---------------------------------------------------------------------------

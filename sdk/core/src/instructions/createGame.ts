@@ -19,6 +19,7 @@ export interface CreateGameArgs {
   whitelist: boolean;
   serverPubkey: PublicKey | null;
   noiseThresholds: NoiseThresholds;
+  hashRounds: number;
 }
 
 /**
@@ -62,7 +63,8 @@ export function buildCreateGameIx(
       anchorWinCondition,
       args.whitelist,
       args.serverPubkey,
-      args.noiseThresholds
+      args.noiseThresholds,
+      args.hashRounds
     )
     .accounts({
       admin,

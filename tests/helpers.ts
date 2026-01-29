@@ -12,7 +12,7 @@
  * Provides helper functions for:
  * - blake3-based planet hash computation (matching on-chain logic)
  * - Hash-noise body determination (matching on-chain determine_celestial_body)
- * - PDA derivation for Game, Player, EncryptedCelestialBody, EncryptedPendingMoves
+ * - PDA derivation for Game, Player, EncryptedCelestialBody, PendingMovesMetadata, PendingMoveAccount
  * - Brute-force spawn planet finder
  * - Game + player setup shortcuts
  * - Arcium computation infrastructure helpers
@@ -136,14 +136,19 @@ export const DEFAULT_MAP_DIAMETER = new BN(1000);
 export function computePlanetHash(
   x: bigint,
   y: bigint,
-  gameId: bigint
+  gameId: bigint,
+  rounds: number = 1
 ): Uint8Array {
   const buf = new ArrayBuffer(24);
   const view = new DataView(buf);
   view.setBigInt64(0, x, true);
   view.setBigInt64(8, y, true);
   view.setBigUint64(16, gameId, true);
-  return blake3(new Uint8Array(buf));
+  let hash = blake3(new Uint8Array(buf));
+  for (let r = 1; r < rounds; r++) {
+    hash = blake3(hash);
+  }
+  return hash;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +417,22 @@ export function derivePendingMovesPDA(
   );
 }
 
+export function derivePendingMoveAccountPDA(
+  gameId: bigint,
+  planetHash: Uint8Array,
+  moveId: bigint,
+  programId: PublicKey = PROGRAM_ID
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(gameId);
+  const moveBuf = Buffer.alloc(8);
+  moveBuf.writeBigUInt64LE(moveId);
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("move"), buf, Buffer.from(planetHash), moveBuf],
+    programId
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Brute-force spawn planet finder
 // ---------------------------------------------------------------------------
@@ -563,6 +584,7 @@ export interface GameConfig {
   whitelist: boolean;
   serverPubkey: PublicKey | null;
   noiseThresholds: NoiseThresholds;
+  hashRounds: number;
 }
 
 export function defaultGameConfig(
@@ -579,6 +601,7 @@ export function defaultGameConfig(
     whitelist: false,
     serverPubkey: null,
     noiseThresholds: DEFAULT_THRESHOLDS,
+    hashRounds: 100,
     ...overrides,
   };
 }
@@ -613,7 +636,8 @@ export async function createGame(
       config.winCondition as any,
       config.whitelist,
       config.serverPubkey,
-      anchorThresholds
+      anchorThresholds,
+      config.hashRounds
     )
     .accounts({
       admin: admin.publicKey,
@@ -816,58 +840,47 @@ export function encryptAndPack(
 }
 
 /**
- * Build init_planet ciphertexts (12 values):
- * x(u64), y(u64), game_id(u64), dead_space(u8), planet(u8), quasar(u8),
- * spacetime(u8), s1(u8), s2(u8), s3(u8), s4(u8), s5(u8)
+ * Build init_planet ciphertexts (2 values):
+ * x(u64), y(u64)
+ * Thresholds are passed as plaintext by the on-chain instruction from the Game account.
  */
 export function buildInitPlanetValues(
   x: bigint,
   y: bigint,
-  gameId: bigint,
-  thresholds: NoiseThresholds
 ): bigint[] {
   return [
     BigInt.asUintN(64, x),
     BigInt.asUintN(64, y),
-    gameId,
-    BigInt(thresholds.deadSpaceThreshold),
-    BigInt(thresholds.planetThreshold),
-    BigInt(thresholds.quasarThreshold),
-    BigInt(thresholds.spacetimeRipThreshold),
-    BigInt(thresholds.sizeThreshold1),
-    BigInt(thresholds.sizeThreshold2),
-    BigInt(thresholds.sizeThreshold3),
-    BigInt(thresholds.sizeThreshold4),
-    BigInt(thresholds.sizeThreshold5),
   ];
 }
 
 /**
- * Build init_spawn_planet ciphertexts (16 values):
- * Same as init_planet (12) + player_key_0..3 (4 u64s)
+ * Build init_spawn_planet ciphertexts (4 values):
+ * x(u64), y(u64), player_id(u64), source_planet_id(u64)
  */
 export function buildInitSpawnPlanetValues(
   x: bigint,
   y: bigint,
-  gameId: bigint,
-  thresholds: NoiseThresholds,
-  playerPubkey: PublicKey
+  playerId: bigint,
+  sourcePlanetId: bigint,
 ): bigint[] {
-  const keyParts = pubkeyToU64Parts(playerPubkey);
   return [
-    ...buildInitPlanetValues(x, y, gameId, thresholds),
-    ...keyParts,
+    BigInt.asUintN(64, x),
+    BigInt.asUintN(64, y),
+    playerId,
+    sourcePlanetId,
   ];
 }
 
 /**
- * Build process_move ciphertexts (13 values):
- * player_key_0..3 (u64 x4), ships_to_send (u64), metal_to_send (u64),
- * source_x (u64), source_y (u64), target_x (u64), target_y (u64),
- * current_slot (u64), game_speed (u64), last_updated_slot (u64)
+ * Build process_move ciphertexts (11 values):
+ * player_id(u64), source_planet_id(u64), ships_to_send(u64), metal_to_send(u64),
+ * source_x(u64), source_y(u64), target_x(u64), target_y(u64),
+ * current_slot(u64), game_speed(u64), last_updated_slot(u64)
  */
 export function buildProcessMoveValues(
-  playerPubkey: PublicKey,
+  playerId: bigint,
+  sourcePlanetId: bigint,
   shipsToSend: bigint,
   metalToSend: bigint,
   sourceX: bigint,
@@ -876,11 +889,11 @@ export function buildProcessMoveValues(
   targetY: bigint,
   currentSlot: bigint,
   gameSpeed: bigint,
-  lastUpdatedSlot: bigint
+  lastUpdatedSlot: bigint,
 ): bigint[] {
-  const keyParts = pubkeyToU64Parts(playerPubkey);
   return [
-    ...keyParts,
+    playerId,
+    sourcePlanetId,
     shipsToSend,
     metalToSend,
     BigInt.asUintN(64, sourceX),
@@ -894,102 +907,45 @@ export function buildProcessMoveValues(
 }
 
 /**
- * Build flush_planet ciphertexts (10 values):
- * current_slot (u64), game_speed (u64), last_updated_slot (u64),
- * move_ships (u64), move_metal (u64),
- * move_attacker_0..3 (u64 x4), move_has_landed (u8)
+ * Build flush_planet ciphertexts (4 values - FlushTimingInput):
+ * current_slot(u64), game_speed(u64), last_updated_slot(u64), flush_count(u64)
+ * Move data is read from PendingMoveAccount PDAs via remaining_accounts.
  */
 export function buildFlushPlanetValues(
   currentSlot: bigint,
   gameSpeed: bigint,
   lastUpdatedSlot: bigint,
-  moveShips: bigint,
-  moveMetal: bigint,
-  attackerPubkey: PublicKey,
-  moveHasLanded: boolean
+  flushCount: bigint,
 ): bigint[] {
-  const keyParts = pubkeyToU64Parts(attackerPubkey);
   return [
     currentSlot,
     gameSpeed,
     lastUpdatedSlot,
-    moveShips,
-    moveMetal,
-    ...keyParts,
-    BigInt(moveHasLanded ? 1 : 0),
+    flushCount,
   ];
 }
 
 /**
- * Build upgrade_planet ciphertexts (8 values):
- * player_key_0..3 (u64 x4), focus (u8),
- * current_slot (u64), game_speed (u64), last_updated_slot (u64)
+ * Build upgrade_planet ciphertexts (6 values):
+ * player_id(u64), focus(u8 as u64), current_slot(u64),
+ * game_speed(u64), last_updated_slot(u64), metal_upgrade_cost(u64)
  */
 export function buildUpgradePlanetValues(
-  playerPubkey: PublicKey,
+  playerId: bigint,
   focus: UpgradeFocus,
   currentSlot: bigint,
   gameSpeed: bigint,
-  lastUpdatedSlot: bigint
+  lastUpdatedSlot: bigint,
+  metalUpgradeCost: bigint,
 ): bigint[] {
-  const keyParts = pubkeyToU64Parts(playerPubkey);
   return [
-    ...keyParts,
+    playerId,
     BigInt(focus),
     currentSlot,
     gameSpeed,
     lastUpdatedSlot,
+    metalUpgradeCost,
   ];
-}
-
-/**
- * Convert a PublicKey to 4 u64 parts (little-endian).
- */
-export function pubkeyToU64Parts(pubkey: PublicKey): bigint[] {
-  const keyBytes = pubkey.toBytes();
-  const keyView = new DataView(
-    keyBytes.buffer,
-    keyBytes.byteOffset,
-    keyBytes.byteLength
-  );
-  return [
-    keyView.getBigUint64(0, true),
-    keyView.getBigUint64(8, true),
-    keyView.getBigUint64(16, true),
-    keyView.getBigUint64(24, true),
-  ];
-}
-
-/**
- * Read the encrypted planet state ciphertexts from an on-chain account
- * and return the packed buffer + encryption metadata.
- */
-export function packEncryptedState(
-  encPubkey: number[],
-  encNonce: number[],
-  encCiphertexts: number[][]
-): {
-  stateCts: Uint8Array;
-  statePubkey: Uint8Array;
-  stateNonce: bigint;
-} {
-  const statePubkey = new Uint8Array(encPubkey);
-  const nonceBytes = new Uint8Array(encNonce);
-  const nonceView = new DataView(
-    nonceBytes.buffer,
-    nonceBytes.byteOffset,
-    nonceBytes.byteLength
-  );
-  const nonceLow = nonceView.getBigUint64(0, true);
-  const nonceHigh = nonceView.getBigUint64(8, true);
-  const stateNonce = nonceLow | (nonceHigh << 64n);
-
-  const stateCts = new Uint8Array(19 * 32);
-  for (let i = 0; i < 19; i++) {
-    stateCts.set(new Uint8Array(encCiphertexts[i]), i * 32);
-  }
-
-  return { stateCts, statePubkey, stateNonce };
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1009,8 @@ function getClockAccountAddress(): PublicKey {
 
 /**
  * Queue init_planet MPC computation.
+ * Encrypted input: CoordInput (x, y) = 2 ciphertexts.
+ * Thresholds are passed as plaintext by the on-chain instruction from Game account.
  */
 export async function queueInitPlanet(
   program: Program<EncryptedForest>,
@@ -1060,7 +1018,6 @@ export async function queueInitPlanet(
   gameId: bigint,
   x: bigint,
   y: bigint,
-  thresholds: NoiseThresholds,
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN; planetPDA: PublicKey; pendingMovesPDA: PublicKey }> {
   const planetHash = computePlanetHash(x, y, gameId);
@@ -1070,7 +1027,7 @@ export async function queueInitPlanet(
 
   const nonce = randomBytes(16);
   const nonceValue = deserializeLE(nonce);
-  const values = buildInitPlanetValues(x, y, gameId, thresholds);
+  const values = buildInitPlanetValues(x, y);
   const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
 
   const computationOffset = new BN(randomBytes(8), "hex");
@@ -1104,6 +1061,8 @@ export async function queueInitPlanet(
 
 /**
  * Queue init_spawn_planet MPC computation.
+ * Encrypted input: SpawnInput (x, y, player_id, source_planet_id) = 4 ciphertexts.
+ * Thresholds are passed as plaintext by the on-chain instruction from Game account.
  */
 export async function queueInitSpawnPlanet(
   program: Program<EncryptedForest>,
@@ -1111,7 +1070,8 @@ export async function queueInitSpawnPlanet(
   gameId: bigint,
   x: bigint,
   y: bigint,
-  thresholds: NoiseThresholds,
+  playerId: bigint,
+  sourcePlanetId: bigint,
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN; planetPDA: PublicKey; pendingMovesPDA: PublicKey; playerPDA: PublicKey }> {
   const planetHash = computePlanetHash(x, y, gameId);
@@ -1122,7 +1082,7 @@ export async function queueInitSpawnPlanet(
 
   const nonce = randomBytes(16);
   const nonceValue = deserializeLE(nonce);
-  const values = buildInitSpawnPlanetValues(x, y, gameId, thresholds, payer.publicKey);
+  const values = buildInitSpawnPlanetValues(x, y, playerId, sourcePlanetId);
   const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
 
   const computationOffset = new BN(randomBytes(8), "hex");
@@ -1156,23 +1116,21 @@ export async function queueInitSpawnPlanet(
 
 /**
  * Queue process_move MPC computation.
+ * Planet state (static + dynamic) is read via .account() from source_body by the MPC.
+ * Encrypted input: ProcessMoveInput (11 fields) = 11 ciphertexts.
  */
 export async function queueProcessMove(
   program: Program<EncryptedForest>,
   payer: Keypair,
   gameId: bigint,
   sourceBody: PublicKey,
+  sourcePending: PublicKey,
   targetPending: PublicKey,
-  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
+  landingSlot: bigint,
   moveValues: bigint[],
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN }> {
   const [gamePDA] = deriveGamePDA(gameId, program.programId);
-  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
-    stateData.encPubkey,
-    stateData.encNonce,
-    stateData.encCiphertexts
-  );
 
   const moveNonce = randomBytes(16);
   const moveNonceValue = deserializeLE(moveNonce);
@@ -1187,9 +1145,7 @@ export async function queueProcessMove(
   await program.methods
     .queueProcessMove(
       computationOffset,
-      Buffer.from(stateCts) as any,
-      Array.from(statePubkey) as any,
-      new BN(stateNonce.toString()),
+      new BN(landingSlot.toString()),
       Buffer.from(movePacked) as any,
       Array.from(encCtx.publicKey) as any,
       new BN(moveNonceValue.toString()),
@@ -1199,6 +1155,7 @@ export async function queueProcessMove(
       payer: payer.publicKey,
       game: gamePDA,
       sourceBody,
+      sourcePending,
       targetPending,
       ...arciumAccts,
     })
@@ -1210,23 +1167,20 @@ export async function queueProcessMove(
 
 /**
  * Queue flush_planet MPC computation.
+ * Planet state (static + dynamic) is read via .account() from celestial_body by the MPC.
+ * Move data is read via .account() from PendingMoveAccount PDAs (remaining_accounts).
+ * Encrypted input: FlushTimingInput (4 fields) = 4 ciphertexts.
  */
 export async function queueFlushPlanet(
   program: Program<EncryptedForest>,
   payer: Keypair,
   celestialBody: PublicKey,
   pendingMoves: PublicKey,
-  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
+  flushCount: number,
   flushValues: bigint[],
-  moveIndex: number,
+  moveAccounts: PublicKey[],
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN }> {
-  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
-    stateData.encPubkey,
-    stateData.encNonce,
-    stateData.encCiphertexts
-  );
-
   const flushNonce = randomBytes(16);
   const flushNonceValue = deserializeLE(flushNonce);
   const { packed: flushPacked } = encryptAndPack(encCtx.cipher, flushValues, flushNonce);
@@ -1237,10 +1191,7 @@ export async function queueFlushPlanet(
   await program.methods
     .queueFlushPlanet(
       computationOffset,
-      moveIndex,
-      Buffer.from(stateCts) as any,
-      Array.from(statePubkey) as any,
-      new BN(stateNonce.toString()),
+      flushCount,
       Buffer.from(flushPacked) as any,
       Array.from(encCtx.publicKey) as any,
       new BN(flushNonceValue.toString())
@@ -1251,6 +1202,13 @@ export async function queueFlushPlanet(
       pendingMoves,
       ...arciumAccts,
     })
+    .remainingAccounts(
+      moveAccounts.map((pubkey) => ({
+        pubkey,
+        isSigner: false,
+        isWritable: false,
+      }))
+    )
     .signers([payer])
     .rpc({ skipPreflight: true, commitment: "confirmed" });
 
@@ -1259,22 +1217,18 @@ export async function queueFlushPlanet(
 
 /**
  * Queue upgrade_planet MPC computation.
+ * Planet state (static + dynamic) is read via .account() from celestial_body by the MPC.
+ * Encrypted input: UpgradePlanetInput (6 fields) = 6 ciphertexts.
  */
 export async function queueUpgradePlanet(
   program: Program<EncryptedForest>,
   payer: Keypair,
   gameId: bigint,
   celestialBody: PublicKey,
-  stateData: { encPubkey: number[]; encNonce: number[]; encCiphertexts: number[][] },
   upgradeValues: bigint[],
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN }> {
   const [gamePDA] = deriveGamePDA(gameId, program.programId);
-  const { stateCts, statePubkey, stateNonce } = packEncryptedState(
-    stateData.encPubkey,
-    stateData.encNonce,
-    stateData.encCiphertexts
-  );
 
   const upgradeNonce = randomBytes(16);
   const upgradeNonceValue = deserializeLE(upgradeNonce);
@@ -1286,9 +1240,6 @@ export async function queueUpgradePlanet(
   await program.methods
     .queueUpgradePlanet(
       computationOffset,
-      Buffer.from(stateCts) as any,
-      Array.from(statePubkey) as any,
-      new BN(stateNonce.toString()),
       Buffer.from(upgradePacked) as any,
       Array.from(encCtx.publicKey) as any,
       new BN(upgradeNonceValue.toString())

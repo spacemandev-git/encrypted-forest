@@ -3,15 +3,10 @@
  *
  * Queues an Arcium init_planet computation to initialize a new planet
  * with encrypted state. Creates the EncryptedCelestialBody and
- * EncryptedPendingMoves accounts.
+ * PendingMovesMetadata accounts.
  *
- * Ciphertexts (12 * 32 bytes packed):
- *   0: x (u64), 1: y (u64), 2: game_id (u64),
- *   3: dead_space_threshold (u8), 4: planet_threshold (u8),
- *   5: quasar_threshold (u8), 6: spacetime_rip_threshold (u8),
- *   7: size_threshold_1 (u8), 8: size_threshold_2 (u8),
- *   9: size_threshold_3 (u8), 10: size_threshold_4 (u8),
- *   11: size_threshold_5 (u8)
+ * Encrypted input: Enc<Shared, CoordInput> = 2 ciphertexts (x, y)
+ * Plaintext params from Game account are passed by the on-chain program.
  */
 
 import { type Program, BN } from "@coral-xyz/anchor";
@@ -27,9 +22,9 @@ export interface QueueInitPlanetArgs {
   gameId: bigint;
   computationOffset: bigint;
   planetHash: Uint8Array;
-  /** 12 ciphertexts packed as a single Vec<u8> (12 * 32 = 384 bytes) */
+  /** 2 ciphertexts packed as Vec<u8> (2 * 32 = 64 bytes): x, y */
   ciphertexts: Uint8Array;
-  /** x25519 public key for encryption */
+  /** x25519 public key for Enc<Shared, CoordInput> */
   pubkey: Uint8Array;
   /** Nonce for encryption (u128) */
   nonce: bigint;

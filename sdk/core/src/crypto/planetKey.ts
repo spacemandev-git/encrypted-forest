@@ -21,9 +21,10 @@ import { computePlanetHash } from "../noise/index.js";
 export function derivePlanetKeySeed(
   x: bigint,
   y: bigint,
-  gameId: bigint
+  gameId: bigint,
+  rounds: number = 1
 ): Uint8Array {
-  return computePlanetHash(x, y, gameId);
+  return computePlanetHash(x, y, gameId, rounds);
 }
 
 /**
@@ -34,9 +35,10 @@ export function verifyPlanetHash(
   x: bigint,
   y: bigint,
   gameId: bigint,
-  expectedHash: Uint8Array
+  expectedHash: Uint8Array,
+  rounds: number = 1
 ): boolean {
-  const computed = computePlanetHash(x, y, gameId);
+  const computed = computePlanetHash(x, y, gameId, rounds);
   if (computed.length !== expectedHash.length) return false;
   for (let i = 0; i < computed.length; i++) {
     if (computed[i] !== expectedHash[i]) return false;

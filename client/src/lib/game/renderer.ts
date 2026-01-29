@@ -7,7 +7,7 @@
  */
 
 import * as THREE from "three";
-import { CelestialBodyType, pubkeyFromParts } from "@encrypted-forest/core";
+import { CelestialBodyType } from "@encrypted-forest/core";
 import type { PlanetEntry } from "@encrypted-forest/client";
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ export class PlanetRenderer {
     entry: PlanetEntry,
     playerPubkey?: string
   ): void {
-    const { discovery, onChain } = entry;
+    const { discovery, decrypted } = entry;
     const bodyType = discovery.properties.bodyType;
     const size = discovery.properties.size;
 
@@ -136,10 +136,10 @@ export class PlanetRenderer {
       metalness: 0.3,
     });
 
-    // Highlight owned planets
-    if (onChain?.owner && playerPubkey) {
-      const ownerStr = onChain.owner.toBase58();
-      if (ownerStr === playerPubkey) {
+    // Highlight owned planets using decrypted dynamic state
+    if (decrypted && decrypted.dynamic.ownerExists !== 0 && playerPubkey) {
+      const ownerId = decrypted.dynamic.ownerId.toString();
+      if (ownerId === playerPubkey) {
         material.emissiveIntensity = 0.6;
         material.wireframe = false;
       }
@@ -189,18 +189,10 @@ export class PlanetRenderer {
     const material = planetMesh.mesh.material as THREE.MeshStandardMaterial;
 
     // Update ownership highlight using decrypted state
-    if (entry.decrypted && entry.decrypted.ownerExists !== 0 && playerPubkey) {
-      const ownerKey = pubkeyFromParts(
-        entry.decrypted.owner0,
-        entry.decrypted.owner1,
-        entry.decrypted.owner2,
-        entry.decrypted.owner3
-      );
-      // Compare owner bytes as hex string to the playerPubkey string
-      const ownerHex = Array.from(ownerKey)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-      if (ownerHex === playerPubkey || playerPubkey === ownerKey.toString()) {
+    if (entry.decrypted && entry.decrypted.dynamic.ownerExists !== 0 && playerPubkey) {
+      // ownerId is a u64 -- compare as string against the playerPubkey (player_id)
+      const ownerId = entry.decrypted.dynamic.ownerId.toString();
+      if (ownerId === playerPubkey) {
         material.emissiveIntensity = 0.6;
       } else {
         material.emissiveIntensity = 0.3;

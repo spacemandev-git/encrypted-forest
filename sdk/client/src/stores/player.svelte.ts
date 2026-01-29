@@ -7,7 +7,6 @@
 
 import type { EncryptedForestClient } from "@encrypted-forest/core";
 import type { Player, Subscription } from "@encrypted-forest/core";
-import { pubkeyFromParts } from "@encrypted-forest/core";
 import type { PublicKey } from "@solana/web3.js";
 import type { PlanetsStore, PlanetEntry } from "./planets.svelte.js";
 
@@ -18,6 +17,8 @@ export class PlayerStore {
 
   player = $state<Player | null>(null);
   playerPubkey = $state<PublicKey | null>(null);
+  /** Numeric player ID used for ownership comparisons in encrypted state */
+  playerId = $state<bigint | null>(null);
   loading = $state(false);
   error = $state<string | null>(null);
 
@@ -27,11 +28,10 @@ export class PlayerStore {
   /** Player points */
   points = $derived(this.player?.points ?? 0n);
 
-  /** List of owned planet entries (decrypted state matches player pubkey) */
+  /** List of owned planet entries (decrypted state matches player id) */
   ownedPlanetsList = $derived.by((): PlanetEntry[] => {
-    if (!this.playerPubkey) return [];
-    const ownerBytes = this.playerPubkey.toBytes();
-    return this.#planetsStore.ownedBy(ownerBytes);
+    if (this.playerId === null) return [];
+    return this.#planetsStore.ownedBy(this.playerId);
   });
 
   /** Number of planets owned by this player */
@@ -42,7 +42,7 @@ export class PlayerStore {
     let total = 0n;
     for (const entry of this.ownedPlanetsList) {
       if (entry.decrypted) {
-        total += BigInt(entry.decrypted.shipCount);
+        total += BigInt(entry.decrypted.dynamic.shipCount);
       }
     }
     return total;
@@ -53,7 +53,7 @@ export class PlayerStore {
     let total = 0n;
     for (const entry of this.ownedPlanetsList) {
       if (entry.decrypted) {
-        total += BigInt(entry.decrypted.metalCount);
+        total += BigInt(entry.decrypted.dynamic.metalCount);
       }
     }
     return total;
@@ -66,11 +66,13 @@ export class PlayerStore {
 
   /**
    * Load a player and subscribe to updates.
+   * @param playerId Numeric player ID (u64) used for encrypted ownership comparisons
    */
-  async load(gameId: bigint, playerPubkey: PublicKey): Promise<void> {
+  async load(gameId: bigint, playerPubkey: PublicKey, playerId: bigint): Promise<void> {
     this.loading = true;
     this.error = null;
     this.playerPubkey = playerPubkey;
+    this.playerId = playerId;
 
     try {
       this.#unsubscribe();
@@ -119,6 +121,7 @@ export class PlayerStore {
     this.#unsubscribe();
     this.player = null;
     this.playerPubkey = null;
+    this.playerId = null;
     this.error = null;
   }
 

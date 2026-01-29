@@ -1,17 +1,16 @@
 /**
  * Instruction builder: queue_flush_planet
  *
- * Queues an Arcium flush_planet computation to resolve the first pending
- * move on a planet. The computation applies combat or reinforcement,
- * updates the planet state, and removes the move from the queue.
+ * Queues an Arcium flush_planet computation to resolve a batch of up to 8
+ * landed moves on a planet. The computation applies combat/reinforcement
+ * sequentially and returns updated PlanetDynamic.
  *
- * state_cts (19 * 32 = 608 bytes): Current encrypted planet state.
- * flush_cts (10 * 32 = 320 bytes):
- *   0: current_slot (u64), 1: game_speed (u64),
- *   2: last_updated_slot (u64),
- *   3: move_ships (u64), 4: move_metal (u64),
- *   5-8: move_attacker_0..3 (u64 x4),
- *   9: move_has_landed (u8)
+ * Planet state (static + dynamic) is read by MPC nodes directly from
+ * celestial_body via .account() -- NOT passed as ciphertexts.
+ * Move data is read from PendingMoveAccount PDAs via remaining_accounts.
+ *
+ * Encrypted input: Enc<Shared, FlushTimingInput> = 4 ciphertexts:
+ *   current_slot, game_speed, last_updated_slot, flush_count
  */
 
 import { type Program, BN } from "@coral-xyz/anchor";
@@ -20,24 +19,20 @@ import type { ArciumAccounts } from "./arciumAccounts.js";
 
 export interface QueueFlushPlanetArgs {
   computationOffset: bigint;
-  /** Index of the pending move to flush (typically 0) */
-  moveIndex: number;
-  /** Planet encrypted state (19 * 32 bytes) */
-  stateCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the state ciphertexts */
-  statePubkey: Uint8Array;
-  /** Nonce used for the state ciphertexts (u128) */
-  stateNonce: bigint;
-  /** Flush input ciphertexts (10 * 32 bytes) */
+  /** Number of moves to flush (1-8) */
+  flushCount: number;
+  /** 4 ciphertexts packed as Vec<u8> (4 * 32 = 128 bytes): FlushTimingInput */
   flushCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the flush ciphertexts */
+  /** x25519 pubkey for Enc<Shared, FlushTimingInput> */
   flushPubkey: Uint8Array;
-  /** Nonce used for the flush ciphertexts (u128) */
+  /** Nonce for the flush encryption (u128) */
   flushNonce: bigint;
   /** Celestial body account address */
   celestialBody: PublicKey;
-  /** Pending moves account address */
+  /** Pending moves metadata account address */
   pendingMoves: PublicKey;
+  /** PendingMoveAccount PDAs for the moves being flushed (remaining_accounts) */
+  moveAccounts: PublicKey[];
 }
 
 /**
@@ -52,10 +47,7 @@ export function buildQueueFlushPlanetIx(
   return program.methods
     .queueFlushPlanet(
       new BN(args.computationOffset.toString()),
-      args.moveIndex,
-      Buffer.from(args.stateCts),
-      Array.from(args.statePubkey) as any,
-      new BN(args.stateNonce.toString()),
+      args.flushCount,
       Buffer.from(args.flushCts),
       Array.from(args.flushPubkey) as any,
       new BN(args.flushNonce.toString())
@@ -75,5 +67,12 @@ export function buildQueueFlushPlanetIx(
       clockAccount: arciumAccounts.clockAccount,
       systemProgram: SystemProgram.programId,
       arciumProgram: arciumAccounts.arciumProgram,
-    });
+    })
+    .remainingAccounts(
+      args.moveAccounts.map((pubkey) => ({
+        pubkey,
+        isSigner: false,
+        isWritable: false,
+      }))
+    );
 }

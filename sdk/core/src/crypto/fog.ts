@@ -84,12 +84,13 @@ export function revealPlanet(
   y: bigint,
   gameId: bigint,
   thresholds: NoiseThresholds,
-  expectedHash?: Uint8Array
+  expectedHash?: Uint8Array,
+  rounds: number = 1
 ): DiscoveredPlanet | null {
-  const hash = computePlanetHash(x, y, gameId);
+  const hash = computePlanetHash(x, y, gameId, rounds);
 
   // If an expected hash is provided, verify it matches
-  if (expectedHash && !verifyPlanetHash(x, y, gameId, expectedHash)) {
+  if (expectedHash && !verifyPlanetHash(x, y, gameId, expectedHash, rounds)) {
     return null;
   }
 
@@ -102,7 +103,7 @@ export function revealPlanet(
     x,
     y,
     hash,
-    keySeed: derivePlanetKeySeed(x, y, gameId),
+    keySeed: derivePlanetKeySeed(x, y, gameId, rounds),
     properties,
   };
 }

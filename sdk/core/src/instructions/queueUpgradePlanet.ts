@@ -5,13 +5,11 @@
  * celestial body. Spends metal and applies stat upgrades based on the
  * chosen focus (Range or LaunchVelocity).
  *
- * state_cts (19 * 32 = 608 bytes): Current encrypted planet state.
- * upgrade_cts (8 * 32 = 256 bytes):
- *   0-3: player_key parts (u64 x4)
- *   4: focus (u8)
- *   5: current_slot (u64)
- *   6: game_speed (u64)
- *   7: last_updated_slot (u64)
+ * Planet state (static + dynamic) is read by MPC nodes directly from
+ * celestial_body via .account() -- NOT passed as ciphertexts.
+ *
+ * Encrypted input: Enc<Shared, UpgradePlanetInput> = 6 ciphertexts:
+ *   player_id, focus, current_slot, game_speed, last_updated_slot, metal_upgrade_cost
  */
 
 import { type Program, BN } from "@coral-xyz/anchor";
@@ -22,17 +20,11 @@ import type { ArciumAccounts } from "./arciumAccounts.js";
 export interface QueueUpgradePlanetArgs {
   gameId: bigint;
   computationOffset: bigint;
-  /** Planet encrypted state (19 * 32 bytes) */
-  stateCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the state ciphertexts */
-  statePubkey: Uint8Array;
-  /** Nonce used for the state ciphertexts (u128) */
-  stateNonce: bigint;
-  /** Upgrade input ciphertexts (8 * 32 bytes) */
+  /** 6 ciphertexts packed as Vec<u8> (6 * 32 = 192 bytes) */
   upgradeCts: Uint8Array;
-  /** x25519 pubkey used to encrypt the upgrade ciphertexts */
+  /** x25519 pubkey for Enc<Shared, UpgradePlanetInput> */
   upgradePubkey: Uint8Array;
-  /** Nonce used for the upgrade ciphertexts (u128) */
+  /** Nonce for the upgrade encryption (u128) */
   upgradeNonce: bigint;
   /** Celestial body account address */
   celestialBody: PublicKey;
@@ -52,9 +44,6 @@ export function buildQueueUpgradePlanetIx(
   return program.methods
     .queueUpgradePlanet(
       new BN(args.computationOffset.toString()),
-      Buffer.from(args.stateCts),
-      Array.from(args.statePubkey) as any,
-      new BN(args.stateNonce.toString()),
       Buffer.from(args.upgradeCts),
       Array.from(args.upgradePubkey) as any,
       new BN(args.upgradeNonce.toString())
