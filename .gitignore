@@ -17,6 +17,7 @@ node_modules/
 # Environment and secrets
 .env
 .env.local
+admin.json
 arx-keys/node-*/node-keypair.json
 arx-keys/node-*/callback-kp.json
 arx-keys/node-*/identity.pem
@@ -30,3 +31,5 @@ logs/
 # IDL (generated)
 target/idl/
 target/types/
+sdk/core/src/idl/
+sdk/client/src/idl/

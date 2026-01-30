@@ -740,7 +740,7 @@ export function getSignPdaAddress(programId: PublicKey): PublicKey {
  */
 export const DEFAULT_CIRCUIT_BASE_URL = process.env.CIRCUIT_BASE_URL;
 if (!DEFAULT_CIRCUIT_BASE_URL) {
-  throw new Error("CIRCUIT_BASE_URL env var is required (e.g. https://<account>.r2.cloudflarestorage.com/<bucket>)");
+  throw new Error("CIRCUIT_BASE_URL env var is required (e.g. https://s3.spacerisk.io/spacerisk)");
 }
 
 export async function initAllCompDefs(
