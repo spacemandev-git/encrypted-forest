@@ -46,9 +46,9 @@ deploy:
 test:
 	arcium test
 
-# Run tests against an already-running Surfpool instance
+# Run tests against an already-running local environment (started via ./scripts/run-local.sh)
 test-local:
-	arcium test --cluster devnet
+	set -a && . ./.env && set +a && ANCHOR_PROVIDER_URL=http://localhost:8899 ANCHOR_WALLET=./admin.json bunx vitest run
 
 # ---------------------------------------------------------------------------
 # Dependencies

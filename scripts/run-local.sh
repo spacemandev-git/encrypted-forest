@@ -17,7 +17,6 @@
 #
 # Usage:
 #   ./scripts/run-local.sh [--skip-deps] [--skip-build] [--skip-deploy]
-#                          [--docker-ssh user@host]
 
 set -euo pipefail
 
@@ -55,31 +54,18 @@ TD_DIR="${ARX_KEYS_DIR}/trusted-dealer"
 SKIP_DEPS=false
 SKIP_BUILD=false
 SKIP_DEPLOY=false
-DOCKER_SSH=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-deps)   SKIP_DEPS=true ;;
     --skip-build)  SKIP_BUILD=true ;;
     --skip-deploy) SKIP_DEPLOY=true ;;
-    --docker-ssh)
-      shift
-      if [ $# -eq 0 ]; then
-        echo "Error: --docker-ssh requires a user@host argument"
-        exit 1
-      fi
-      DOCKER_SSH="$1"
-      ;;
     --help|-h)
       echo "Usage: run-local.sh [--skip-deps] [--skip-build] [--skip-deploy]"
-      echo "                    [--docker-ssh user@host]"
       echo ""
       echo "  --skip-deps          Skip dependency checks (scripts/setup-deps.sh)"
       echo "  --skip-build         Skip arcium build step"
       echo "  --skip-deploy        Skip deploy + circuit upload"
-      echo "  --docker-ssh HOST    Run Docker containers on a remote x86 Linux host"
-      echo "                       via SSH. Surfpool and Arcium CLI still run locally."
-      echo "                       Solves QUIC-over-emulation failures on Apple Silicon."
       exit 0
       ;;
     *)
@@ -90,61 +76,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ---------------------------------------------------------------------------
-# Remote Docker SSH helpers
-# ---------------------------------------------------------------------------
-REMOTE_PROJECT_DIR="projects/encrypted-forest"
-MAC_LAN_IP=""
 RPC_HOST="host.docker.internal"
-
-if [ -n "$DOCKER_SSH" ]; then
-  # Detect Mac's LAN IP (how remote containers reach Surfpool on this Mac)
-  MAC_LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
-  if [ -z "$MAC_LAN_IP" ]; then
-    echo "ERROR: Could not detect Mac LAN IP. Ensure Wi-Fi/Ethernet is connected." >&2
-    exit 1
-  fi
-  RPC_HOST="$MAC_LAN_IP"
-
-  # Verify SSH connectivity
-  if ! ssh -o ConnectTimeout=5 "$DOCKER_SSH" "echo ok" >/dev/null 2>&1; then
-    echo "ERROR: Cannot SSH to ${DOCKER_SSH}" >&2
-    exit 1
-  fi
-fi
-
-# Wrapper: run docker commands locally or on remote host
-docker_cmd() {
-  if [ -n "$DOCKER_SSH" ]; then
-    ssh "$DOCKER_SSH" "cd ~/${REMOTE_PROJECT_DIR} && $*"
-  else
-    eval "$@"
-  fi
-}
-
-# Sync local files to remote host (no-op when running locally)
-sync_to_remote() {
-  if [ -z "$DOCKER_SSH" ]; then return; fi
-  task "Syncing files to ${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}"
-  ssh "$DOCKER_SSH" "mkdir -p ~/${REMOTE_PROJECT_DIR}/{arx-keys,logs}"
-  # Docker volume mounts create root-owned directory placeholders when the source
-  # file doesn't exist yet. These can't be overwritten by rsync or removed without
-  # root. Use a Docker container to clean them, then rsync the real files.
-  ssh "$DOCKER_SSH" "docker run --rm -v \$HOME/${REMOTE_PROJECT_DIR}/arx-keys:/clean alpine sh -c 'rm -rf /clean/*'" 2>/dev/null || true
-  rsync -az --delete \
-    "${PROJECT_ROOT}/arx-keys/" \
-    "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/arx-keys/"
-  rsync -az \
-    "${PROJECT_ROOT}/docker-compose.yml" \
-    "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/docker-compose.yml"
-  ok "Files synced to remote"
-}
-
-# Pull logs back from remote (no-op when running locally)
-sync_logs_from_remote() {
-  if [ -z "$DOCKER_SSH" ]; then return; fi
-  rsync -az "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/logs/" "${PROJECT_ROOT}/logs/remote/" 2>/dev/null || true
-}
 
 # ---------------------------------------------------------------------------
 # Logging & Status System
@@ -379,10 +311,6 @@ echo -e "  ╔══════════════════════
 echo -e "  ║     Encrypted Forest — Local Bootstrap    ║" >&2
 echo -e "  ╚═══════════════════════════════════════════╝${RESET}" >&2
 echo -e "${DIM}  Verbose log: ${VERBOSE_LOG}${RESET}" >&2
-if [ -n "$DOCKER_SSH" ]; then
-  echo -e "${YELLOW}  Docker SSH : ${DOCKER_SSH}${RESET}" >&2
-  echo -e "${YELLOW}  Mac LAN IP : ${MAC_LAN_IP} (containers → Surfpool)${RESET}" >&2
-fi
 echo "" >&2
 
 # =========================================================================
@@ -553,11 +481,6 @@ SURFPOOL_LOG="${PROJECT_ROOT}/logs/surfpool.log"
 AIRDROP_LAMPORTS=100000000000
 
 task "Starting Surfpool validator"
-SURFPOOL_EXTRA_ARGS=()
-if [ -n "$DOCKER_SSH" ]; then
-  SURFPOOL_EXTRA_ARGS+=(--host 0.0.0.0)
-  ok "Surfpool will bind 0.0.0.0 (reachable from remote Docker at ${MAC_LAN_IP})"
-fi
 surfpool start \
   --db "${PROJECT_ROOT}/dev.sqlite" \
   --block-production-mode clock \
@@ -566,7 +489,6 @@ surfpool start \
   --no-deploy \
   --airdrop-keypair-path "$ADMIN_KP" \
   --airdrop-amount "$AIRDROP_LAMPORTS" \
-  ${SURFPOOL_EXTRA_ARGS[@]+"${SURFPOOL_EXTRA_ARGS[@]}"} \
   > "$SURFPOOL_LOG" 2>&1 &
 
 SURFPOOL_PID=$!
@@ -811,44 +733,21 @@ step_done
 # =========================================================================
 step_start 6 "Starting Docker ARX nodes"
 
-if [ -z "$DOCKER_SSH" ]; then
-  if ! command -v docker &>/dev/null; then
-    fail "docker not found. Install Docker to run ARX nodes."
-  fi
+if ! command -v docker &>/dev/null; then
+  fail "docker not found. Install Docker to run ARX nodes."
 fi
-
-# Sync configs to remote before any Docker operations
-sync_to_remote
 
 task "Cleaning up old Docker resources"
-if [ -n "$DOCKER_SSH" ]; then
-  docker_cmd "docker compose -f docker-compose.yml down" >> "$VERBOSE_LOG" 2>&1 || true
-  docker_cmd 'for net in $(docker network ls --filter driver=bridge --format "{{.Name}}" 2>/dev/null); do
-    subnet=$(docker network inspect "$net" --format "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null || echo "")
-    if [ "$subnet" = "172.20.0.0/16" ]; then docker network rm "$net" 2>/dev/null || true; fi
-  done' >> "$VERBOSE_LOG" 2>&1 || true
-else
-  docker compose -f "${PROJECT_ROOT}/docker-compose.yml" down >> "$VERBOSE_LOG" 2>&1 || true
-  for net in $(docker network ls --filter driver=bridge --format '{{.Name}}' 2>/dev/null); do
-    subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "")
-    if [ "$subnet" = "172.20.0.0/16" ]; then
-      docker network rm "$net" >> "$VERBOSE_LOG" 2>&1 || true
-    fi
-  done
-fi
+docker compose -f "${PROJECT_ROOT}/docker-compose.yml" down >> "$VERBOSE_LOG" 2>&1 || true
+for net in $(docker network ls --filter driver=bridge --format '{{.Name}}' 2>/dev/null); do
+  subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "")
+  if [ "$subnet" = "172.20.0.0/16" ]; then
+    docker network rm "$net" >> "$VERBOSE_LOG" 2>&1 || true
+  fi
+done
 
 task "Running docker compose up"
-if [ -n "$DOCKER_SSH" ]; then
-  # On remote, compose may exit non-zero if health checks fail initially (e.g. ARX nodes
-  # can't reach Surfpool yet). The health-check loop below handles retries, so don't die here.
-  docker_cmd "docker compose -f docker-compose.yml up -d" >> "$VERBOSE_LOG" 2>&1 || {
-    warn "docker compose up exited with error on remote — checking container status"
-    docker_cmd "docker compose -f docker-compose.yml ps" >> "$VERBOSE_LOG" 2>&1 || true
-    docker_cmd "docker logs ef-arx-node-1 2>&1 | tail -30" >> "$VERBOSE_LOG" 2>&1 || true
-  }
-else
-  docker compose -f "${PROJECT_ROOT}/docker-compose.yml" up -d >> "$VERBOSE_LOG" 2>&1
-fi
+docker compose -f "${PROJECT_ROOT}/docker-compose.yml" up -d >> "$VERBOSE_LOG" 2>&1
 ok "Docker services started (or starting)"
 
 # Wait for all nodes (including extra nodes outside the cluster) to become active
@@ -887,9 +786,6 @@ else
     echo -e "  ${DIM}  offset ${offset}: ${status}${RESET}" >&2
   done
 fi
-
-# Pull container logs back from remote for debugging
-sync_logs_from_remote
 
 step_done
 
@@ -1052,10 +948,6 @@ echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Surfpool RPC${RESET}  : ${RPC_URL}
 echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Surfpool WS${RESET}   : ws://localhost:8900          ${BOLD}${GREEN}║${RESET}" >&2
 echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Admin keypair${RESET} : ${DIM}${ADMIN_KP}${RESET}" >&2
 echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Cluster${RESET}       : offset=${CLUSTER_OFFSET}, nodes=${NUM_NODES}             ${BOLD}${GREEN}║${RESET}" >&2
-if [ -n "$DOCKER_SSH" ]; then
-echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Docker host${RESET}   : ${DOCKER_SSH}   ${BOLD}${GREEN}║${RESET}" >&2
-echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Mac LAN IP${RESET}    : ${MAC_LAN_IP}                  ${BOLD}${GREEN}║${RESET}" >&2
-fi
 echo -e "${BOLD}${GREEN}  ║${RESET}                                                   ${BOLD}${GREEN}║${RESET}" >&2
 echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Next steps:${RESET}                                    ${BOLD}${GREEN}║${RESET}" >&2
 echo -e "${BOLD}${GREEN}  ║${RESET}    ${CYAN}cd client && bun run dev${RESET}  — Start game client ${BOLD}${GREEN}║${RESET}" >&2

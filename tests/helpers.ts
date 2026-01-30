@@ -601,7 +601,7 @@ export function defaultGameConfig(
     whitelist: false,
     serverPubkey: null,
     noiseThresholds: DEFAULT_THRESHOLDS,
-    hashRounds: 100,
+    hashRounds: 1,
     ...overrides,
   };
 }
@@ -1260,10 +1260,15 @@ export async function queueUpgradePlanet(
 // Unique game ID generator
 // ---------------------------------------------------------------------------
 
-let gameIdCounter = BigInt(Date.now());
-
+/**
+ * Generate a unique game ID using random bytes.
+ * This avoids collisions when vitest runs test files in parallel
+ * (each file gets its own module scope, so a Date.now()-based counter
+ * would start at the same value in each worker).
+ */
 export function nextGameId(): bigint {
-  return gameIdCounter++;
+  const bytes = randomBytes(8);
+  return BigInt("0x" + bytes.toString("hex"));
 }
 
 // ---------------------------------------------------------------------------

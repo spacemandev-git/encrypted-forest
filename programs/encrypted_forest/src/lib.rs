@@ -12,7 +12,7 @@ const COMP_DEF_OFFSET_PROCESS_MOVE: u32 = comp_def_offset("process_move");
 const COMP_DEF_OFFSET_FLUSH_PLANET: u32 = comp_def_offset("flush_planet");
 const COMP_DEF_OFFSET_UPGRADE_PLANET: u32 = comp_def_offset("upgrade_planet");
 
-declare_id!("DBq6SfanaWewpcEabnqgyEQj43CJ5vRzRU6oAdnndUXr");
+declare_id!("DjjmgrEJKpEocUCpgjbHCvbz9MTGWK8VBjF63AFN9snW");
 
 // ---------------------------------------------------------------------------
 // Constants
