@@ -18,11 +18,8 @@ node_modules/
 .env
 .env.local
 admin.json
-arx-keys/node-*/node-keypair.json
-arx-keys/node-*/callback-kp.json
-arx-keys/node-*/identity.pem
-arx-keys/node-*/bls-keypair.json
-arx-keys/node-*/x25519-keypair.json
+arx-keys/*
+arx-keys/*
 
 # Dev environment runtime
 .pids/
@@ -33,3 +30,7 @@ target/idl/
 target/types/
 sdk/core/src/idl/
 sdk/client/src/idl/
+
+# Wrangler
+.wrangler
+artifacts/

@@ -25,7 +25,7 @@ Fetch https://docs.surfpool.run/toolchain/cli and https://docs.surfpool.run/rpc/
 
 ### 2. Surfpool Launch Scripts
 
-Create `scripts/dev-start.sh`: Start Surfpool with `--db ./dev.sqlite --block-production-mode transaction --port 8899 --watch`. Background it and capture PID.
+Create `scripts/dev-start.sh`: Start Surfpool with `--db ./dev.sqlite --block-production-mode clock --port 8899 --watch`. Background it and capture PID.
 
 Create `scripts/dev-stop.sh`: Clean shutdown of Surfpool and ARX containers.
 
@@ -47,7 +47,7 @@ Create top-level Makefile with targets: `dev`, `stop`, `deploy`, `test`, `clean`
 
 ## Constraints
 
-- Surfpool must use `--db` SQLite and `--block-production-mode transaction`
+- Surfpool must use `--db` SQLite and `--block-production-mode clock`
 - ARX nodes must connect to Surfpool's RPC, not their own validator
 - Setup must be reproducible — `make dev` should work from a fresh clone
 - Use Bun where TypeScript is needed (not npm/node)

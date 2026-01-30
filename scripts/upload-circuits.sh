@@ -34,7 +34,7 @@ for f in "${ARCIS_FILES[@]}"; do
   FILENAME=$(basename "$f")
   SIZE=$(du -h "$f" | cut -f1)
   echo "  ${FILENAME} (${SIZE}) ..."
-  wrangler r2 object put "${BUCKET}/${FILENAME}" --file "$f"
+  wrangler r2 object put "${BUCKET}/${FILENAME}" --file "$f" --remote
 done
 
 echo "All circuit files uploaded to R2 bucket '${BUCKET}'."

@@ -62,6 +62,9 @@ install:
 # ---------------------------------------------------------------------------
 
 clean:
+	@echo "Stopping running services..."
+	-./scripts/dev-stop.sh 2>/dev/null || true
+	-lsof -ti:8899 | xargs kill -9 2>/dev/null || true
 	@echo "Cleaning build artifacts..."
 	-rm -rf target/
 	-rm -rf .anchor/
@@ -70,6 +73,8 @@ clean:
 	-rm -f test.sqlite test.sqlite-wal test.sqlite-shm
 	-rm -rf logs/
 	-rm -rf .pids/
+	@echo "Cleaning ARX keys and trusted dealer..."
+	-rm -rf arx-keys/
 	@echo "Cleaning Docker volumes..."
 	-docker compose down -v 2>/dev/null || true
 	@echo "Clean complete."

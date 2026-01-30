@@ -64,7 +64,7 @@ cleanup_stale_pid "${PIDDIR}/surfpool.pid"
 SURFPOOL_ARGS=(
   start
   --db "${DB_PATH}"
-  --block-production-mode transaction
+  --block-production-mode clock
   --port 8899
   --no-tui
 )

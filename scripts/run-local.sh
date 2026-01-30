@@ -8,14 +8,16 @@
 # Steps:
 #   1. Check/install dependencies        (scripts/setup-deps.sh)
 #   2. Generate admin keypair + ARX node keys (if missing)
-#   3. Start Surfpool + Docker ARX nodes  (airdrop 100 SOL to admin)
-#   4. Initialize Arcium network on Surfpool
-#   5. Build program                      (arcium build)
-#   6. Deploy program + circuits          (scripts/deploy-local.sh)
-#   7. Copy IDL into SDK folders
+#   3. Build program                      (arcium build)
+#   4. Start Surfpool + deploy program    (via Surfpool runbook)
+#   5. Initialize Arcium network on Surfpool
+#   6. Start Docker ARX nodes
+#   7. Initialize MXE                    (arcium deploy --skip-deploy)
+#   8. Copy IDL into SDK folders
 #
 # Usage:
 #   ./scripts/run-local.sh [--skip-deps] [--skip-build] [--skip-deploy]
+#                          [--docker-ssh user@host]
 
 set -euo pipefail
 
@@ -24,10 +26,28 @@ RPC_URL="http://localhost:8899"
 ADMIN_KP="${PROJECT_ROOT}/admin.json"
 ARX_KEYS_DIR="${PROJECT_ROOT}/arx-keys"
 CLUSTER_OFFSET=0
-NUM_NODES=2
+NUM_NODES=3
 
-# Node IPs from Arcium.toml / docker-compose (Docker internal network)
-NODE_IPS=("172.20.0.100" "172.20.0.101")
+# Node offsets start at 1 (offset 0 is reserved by the Arcium network program)
+NODE_OFFSET_START=1
+
+# Node IPs from docker-compose (Docker internal bridge network).
+# Each node also binds its QUIC listener to this specific IP (not 0.0.0.0)
+# to ensure QUIC source-IP is correct on the bridge interface.
+NODE_IPS=("172.20.0.100" "172.20.0.101" "172.20.0.102")
+
+# Recovery: init-arcium-network creates 3 system nodes outside the main cluster.
+# Node-4 goes into a separate "recovery cluster" (offset 1) so its ARX process can boot
+# (ARX nodes require cluster membership to initialize), but it's NOT in the main cluster.
+# Total outside main cluster: 3 system + 1 recovery-cluster node = 4.
+RECOVERY_SET_SIZE=4
+RECOVERY_CLUSTER_OFFSET=1
+NUM_EXTRA_NODES=1
+EXTRA_NODE_OFFSET_START=4
+EXTRA_NODE_IPS=("172.20.0.103")
+
+# Trusted Dealer config (keys used by Docker container)
+TD_DIR="${ARX_KEYS_DIR}/trusted-dealer"
 
 # ---------------------------------------------------------------------------
 # Flags
@@ -35,48 +55,297 @@ NODE_IPS=("172.20.0.100" "172.20.0.101")
 SKIP_DEPS=false
 SKIP_BUILD=false
 SKIP_DEPLOY=false
+DOCKER_SSH=""
 
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --skip-deps)   SKIP_DEPS=true ;;
     --skip-build)  SKIP_BUILD=true ;;
     --skip-deploy) SKIP_DEPLOY=true ;;
+    --docker-ssh)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "Error: --docker-ssh requires a user@host argument"
+        exit 1
+      fi
+      DOCKER_SSH="$1"
+      ;;
     --help|-h)
       echo "Usage: run-local.sh [--skip-deps] [--skip-build] [--skip-deploy]"
+      echo "                    [--docker-ssh user@host]"
       echo ""
-      echo "  --skip-deps     Skip dependency checks (scripts/setup-deps.sh)"
-      echo "  --skip-build    Skip arcium build step"
-      echo "  --skip-deploy   Skip deploy + circuit upload"
+      echo "  --skip-deps          Skip dependency checks (scripts/setup-deps.sh)"
+      echo "  --skip-build         Skip arcium build step"
+      echo "  --skip-deploy        Skip deploy + circuit upload"
+      echo "  --docker-ssh HOST    Run Docker containers on a remote x86 Linux host"
+      echo "                       via SSH. Surfpool and Arcium CLI still run locally."
+      echo "                       Solves QUIC-over-emulation failures on Apple Silicon."
       exit 0
       ;;
     *)
-      echo "Unknown flag: $arg"
+      echo "Unknown flag: $1"
       exit 1
       ;;
   esac
+  shift
 done
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Remote Docker SSH helpers
 # ---------------------------------------------------------------------------
-log()  { echo "==> $*"; }
-info() { echo "    $*"; }
-fail() { echo "ERROR: $*" >&2; exit 1; }
+REMOTE_PROJECT_DIR="projects/encrypted-forest"
+MAC_LAN_IP=""
+RPC_HOST="host.docker.internal"
+
+if [ -n "$DOCKER_SSH" ]; then
+  # Detect Mac's LAN IP (how remote containers reach Surfpool on this Mac)
+  MAC_LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+  if [ -z "$MAC_LAN_IP" ]; then
+    echo "ERROR: Could not detect Mac LAN IP. Ensure Wi-Fi/Ethernet is connected." >&2
+    exit 1
+  fi
+  RPC_HOST="$MAC_LAN_IP"
+
+  # Verify SSH connectivity
+  if ! ssh -o ConnectTimeout=5 "$DOCKER_SSH" "echo ok" >/dev/null 2>&1; then
+    echo "ERROR: Cannot SSH to ${DOCKER_SSH}" >&2
+    exit 1
+  fi
+fi
+
+# Wrapper: run docker commands locally or on remote host
+docker_cmd() {
+  if [ -n "$DOCKER_SSH" ]; then
+    ssh "$DOCKER_SSH" "cd ~/${REMOTE_PROJECT_DIR} && $*"
+  else
+    eval "$@"
+  fi
+}
+
+# Sync local files to remote host (no-op when running locally)
+sync_to_remote() {
+  if [ -z "$DOCKER_SSH" ]; then return; fi
+  task "Syncing files to ${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}"
+  ssh "$DOCKER_SSH" "mkdir -p ~/${REMOTE_PROJECT_DIR}/{arx-keys,logs}"
+  # Docker volume mounts create root-owned directory placeholders when the source
+  # file doesn't exist yet. These can't be overwritten by rsync or removed without
+  # root. Use a Docker container to clean them, then rsync the real files.
+  ssh "$DOCKER_SSH" "docker run --rm -v \$HOME/${REMOTE_PROJECT_DIR}/arx-keys:/clean alpine sh -c 'rm -rf /clean/*'" 2>/dev/null || true
+  rsync -az --delete \
+    "${PROJECT_ROOT}/arx-keys/" \
+    "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/arx-keys/"
+  rsync -az \
+    "${PROJECT_ROOT}/docker-compose.yml" \
+    "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/docker-compose.yml"
+  ok "Files synced to remote"
+}
+
+# Pull logs back from remote (no-op when running locally)
+sync_logs_from_remote() {
+  if [ -z "$DOCKER_SSH" ]; then return; fi
+  rsync -az "${DOCKER_SSH}:~/${REMOTE_PROJECT_DIR}/logs/" "${PROJECT_ROOT}/logs/remote/" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Logging & Status System
+# ---------------------------------------------------------------------------
+SCRIPT_START=$(date +%s)
+CURRENT_STEP=""
+STEP_START_TIME=""
+HEARTBEAT_PID=""
+TASK_FILE="${PROJECT_ROOT}/.pids/current-task"
+VERBOSE_LOG="${PROJECT_ROOT}/logs/run-local-verbose.log"
+
+mkdir -p "${PROJECT_ROOT}/.pids" "${PROJECT_ROOT}/logs"
+: > "$VERBOSE_LOG"
+
+# Detect tty for color support
+if [ -t 2 ]; then
+  BOLD="\033[1m"
+  DIM="\033[2m"
+  GREEN="\033[32m"
+  YELLOW="\033[33m"
+  RED="\033[31m"
+  CYAN="\033[36m"
+  RESET="\033[0m"
+else
+  BOLD="" DIM="" GREEN="" YELLOW="" RED="" CYAN="" RESET=""
+fi
+
+elapsed() {
+  local now
+  now=$(date +%s)
+  local diff=$(( now - SCRIPT_START ))
+  local mins=$(( diff / 60 ))
+  local secs=$(( diff % 60 ))
+  printf "%dm %02ds" "$mins" "$secs"
+}
+
+elapsed_since() {
+  local start="$1"
+  local now
+  now=$(date +%s)
+  local diff=$(( now - start ))
+  local mins=$(( diff / 60 ))
+  local secs=$(( diff % 60 ))
+  if [ "$mins" -gt 0 ]; then
+    printf "%dm %02ds" "$mins" "$secs"
+  else
+    printf "%ds" "$secs"
+  fi
+}
+
+step_start() {
+  local step_num="$1"
+  local description="$2"
+  CURRENT_STEP="$description"
+  STEP_START_TIME=$(date +%s)
+  echo "$description" > "$TASK_FILE"
+  echo -e "${BOLD}${CYAN}[$(elapsed)]${RESET} ${BOLD}Step ${step_num}: ${description}${RESET}" >&2
+}
+
+step_done() {
+  local duration
+  duration=$(elapsed_since "$STEP_START_TIME")
+  echo -e "${BOLD}${GREEN}  ✓${RESET} ${DIM}Done (${duration})${RESET}" >&2
+  echo "" >&2
+}
+
+task() {
+  local description="$1"
+  echo "$description" > "$TASK_FILE"
+  echo -e "  ${DIM}→ ${description}${RESET}" >&2
+}
+
+ok() {
+  echo -e "  ${GREEN}✓ $*${RESET}" >&2
+}
+
+warn() {
+  echo -e "  ${YELLOW}⚠ $*${RESET}" >&2
+}
+
+fail() {
+  echo -e "${RED}${BOLD}✗ ERROR:${RESET}${RED} $*${RESET}" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Background heartbeat — prints status every 10s
+# ---------------------------------------------------------------------------
+start_heartbeat() {
+  (
+    while true; do
+      sleep 10
+      local current_task=""
+      if [ -f "$TASK_FILE" ]; then
+        current_task=$(cat "$TASK_FILE" 2>/dev/null || echo "")
+      fi
+      if [ -n "$current_task" ]; then
+        echo -e "${DIM}[$(elapsed)] Still working on: ${current_task} ...${RESET}" >&2
+      fi
+    done
+  ) &
+  HEARTBEAT_PID=$!
+}
+
+stop_heartbeat() {
+  if [ -n "$HEARTBEAT_PID" ]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+    HEARTBEAT_PID=""
+  fi
+  rm -f "$TASK_FILE"
+}
+
+trap stop_heartbeat EXIT
+
+start_heartbeat
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+# Generate Ed25519 identity PEM in PKCS#8 v1 format (with embedded public key).
+# The arcium async-mpc QUIC library requires the public key to be present in the
+# PEM structure. OpenSSL's `genpkey` only produces v0 (no pubkey), which causes
+# the QUIC handshake to hang silently.
+generate_identity_pem() {
+  local output_path="$1"
+  python3 -c "
+import base64, os
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
+
+key = Ed25519PrivateKey.generate()
+priv = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+# Build PKCS#8 v1 DER (OneAsymmetricKey with public key)
+version = bytes([0x02, 0x01, 0x01])
+oid_seq = bytes([0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70])
+priv_octet = bytes([0x04, 0x22, 0x04, 0x20]) + priv
+pub_tagged = bytes([0x81, 0x21, 0x00]) + pub
+inner = version + oid_seq + priv_octet + pub_tagged
+der = bytes([0x30, len(inner)]) + inner
+
+b64 = base64.b64encode(der).decode()
+wrapped = '\n'.join(b64[i:i+64] for i in range(0, len(b64), 64))
+pem = f'-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n'
+with open('$output_path', 'w') as f:
+    f.write(pem)
+"
+}
+
+# Convert an existing PKCS#8 v0 Ed25519 PEM to v1 (add public key).
+# Preserves the same key material so on-chain peer IDs remain valid.
+upgrade_identity_pem() {
+  local pem_path="$1"
+  python3 -c "
+import base64
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PrivateFormat, PublicFormat, NoEncryption
+
+with open('$pem_path', 'rb') as f:
+    pem_data = f.read()
+
+# Check if already v1 (81 bytes DER = has public key)
+b64 = b''.join(l.strip() for l in pem_data.split(b'\n') if not l.startswith(b'-----'))
+der = base64.b64decode(b64)
+if len(der) > 60:
+    exit(0)  # Already v1, skip
+
+key = load_pem_private_key(pem_data, password=None)
+priv = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+version = bytes([0x02, 0x01, 0x01])
+oid_seq = bytes([0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70])
+priv_octet = bytes([0x04, 0x22, 0x04, 0x20]) + priv
+pub_tagged = bytes([0x81, 0x21, 0x00]) + pub
+inner = version + oid_seq + priv_octet + pub_tagged
+new_der = bytes([0x30, len(inner)]) + inner
+
+b64_out = base64.b64encode(new_der).decode()
+wrapped = '\n'.join(b64_out[i:i+64] for i in range(0, len(b64_out), 64))
+pem_out = f'-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n'
+with open('$pem_path', 'w') as f:
+    f.write(pem_out)
+"
+}
 
 wait_for_rpc() {
   local max_retries=${1:-60}
   local retry=0
-  echo -n "    Waiting for RPC at ${RPC_URL} ..."
+  task "Waiting for RPC at ${RPC_URL}"
   while [ $retry -lt $max_retries ]; do
     if curl -s "${RPC_URL}/health" > /dev/null 2>&1; then
-      echo " ready."
+      ok "RPC is ready"
       return 0
     fi
-    echo -n "."
     sleep 1
     retry=$((retry + 1))
   done
-  echo " timed out after ${max_retries}s."
+  warn "RPC timed out after ${max_retries}s"
   return 1
 }
 
@@ -85,246 +354,563 @@ airdrop_sol() {
   local amount_sol="${2:-100}"
   local addr
   addr=$(solana address --keypair "$keypair_path")
-  info "Airdropping ${amount_sol} SOL to ${addr} ..."
-  # Surfpool airdrop (uses lamports internally, the CLI takes SOL)
-  solana airdrop "$amount_sol" "$addr" --url "$RPC_URL" --commitment confirmed || true
+  solana airdrop "$amount_sol" "$addr" --url "$RPC_URL" --commitment confirmed >> "$VERBOSE_LOG" 2>&1 || true
 }
+
+run_parallel() {
+  local label="$1"
+  shift
+  local pids=("$@")
+  echo "$label" > "$TASK_FILE"
+  local failed=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || failed=$((failed + 1))
+  done
+  if [ $failed -gt 0 ]; then
+    warn "${failed} sub-tasks had non-zero exit (may be OK if re-running)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+echo -e "${BOLD}${CYAN}" >&2
+echo -e "  ╔═══════════════════════════════════════════╗" >&2
+echo -e "  ║     Encrypted Forest — Local Bootstrap    ║" >&2
+echo -e "  ╚═══════════════════════════════════════════╝${RESET}" >&2
+echo -e "${DIM}  Verbose log: ${VERBOSE_LOG}${RESET}" >&2
+if [ -n "$DOCKER_SSH" ]; then
+  echo -e "${YELLOW}  Docker SSH : ${DOCKER_SSH}${RESET}" >&2
+  echo -e "${YELLOW}  Mac LAN IP : ${MAC_LAN_IP} (containers → Surfpool)${RESET}" >&2
+fi
+echo "" >&2
 
 # =========================================================================
 # STEP 1: Check dependencies
 # =========================================================================
 if [ "$SKIP_DEPS" = false ]; then
-  log "Step 1: Checking dependencies ..."
+  step_start 1 "Checking dependencies"
   if [ -x "${PROJECT_ROOT}/scripts/setup-deps.sh" ]; then
-    "${PROJECT_ROOT}/scripts/setup-deps.sh" --check
+    "${PROJECT_ROOT}/scripts/setup-deps.sh" --check >> "$VERBOSE_LOG" 2>&1
+    ok "All dependencies found"
   else
     fail "scripts/setup-deps.sh not found or not executable."
   fi
+  step_done
 else
-  log "Step 1: Skipping dependency checks (--skip-deps)"
+  echo -e "${DIM}[$(elapsed)] Step 1: Skipped (--skip-deps)${RESET}" >&2
+  echo "" >&2
 fi
 
 # =========================================================================
 # STEP 2: Generate keypairs (admin + ARX nodes)
 # =========================================================================
-log "Step 2: Generating keypairs (if missing) ..."
+step_start 2 "Generating keypairs"
 
 # --- Admin keypair (gitignored) ---
 if [ ! -f "$ADMIN_KP" ]; then
-  info "Generating admin keypair at ${ADMIN_KP} ..."
-  solana-keygen new --outfile "$ADMIN_KP" --no-bip39-passphrase --force
+  task "Generating admin keypair"
+  solana-keygen new --outfile "$ADMIN_KP" --no-bip39-passphrase --force >> "$VERBOSE_LOG" 2>&1
+  ok "Admin keypair created: ${ADMIN_KP}"
 else
-  info "Admin keypair already exists: ${ADMIN_KP}"
+  ok "Admin keypair exists: ${ADMIN_KP}"
 fi
 
 # --- ARX node keypairs ---
 generate_node_keys() {
   local node_num="$1"
+  local node_offset="$2"
+  local bind_ip="${3:-0.0.0.0}"
   local node_dir="${ARX_KEYS_DIR}/node-${node_num}"
-  mkdir -p "$node_dir"
+  mkdir -p "$node_dir" "${node_dir}/private-shares" "${node_dir}/public-inputs"
 
-  info "Generating keys for ARX node ${node_num} in ${node_dir}/ ..."
-
-  # Node keypair (Solana keypair)
   if [ ! -f "${node_dir}/node-keypair.json" ]; then
-    solana-keygen new --outfile "${node_dir}/node-keypair.json" --no-bip39-passphrase --force
-    info "  Created node-keypair.json"
-  else
-    info "  node-keypair.json already exists"
+    solana-keygen new --outfile "${node_dir}/node-keypair.json" --no-bip39-passphrase --force >> "$VERBOSE_LOG" 2>&1
   fi
-
-  # Callback authority keypair (Solana keypair)
   if [ ! -f "${node_dir}/callback-kp.json" ]; then
-    solana-keygen new --outfile "${node_dir}/callback-kp.json" --no-bip39-passphrase --force
-    info "  Created callback-kp.json"
-  else
-    info "  callback-kp.json already exists"
+    solana-keygen new --outfile "${node_dir}/callback-kp.json" --no-bip39-passphrase --force >> "$VERBOSE_LOG" 2>&1
   fi
-
-  # Identity keypair (Ed25519 PEM via OpenSSL)
   if [ ! -f "${node_dir}/identity.pem" ]; then
-    openssl genpkey -algorithm Ed25519 -out "${node_dir}/identity.pem"
-    info "  Created identity.pem"
+    generate_identity_pem "${node_dir}/identity.pem"
   else
-    info "  identity.pem already exists"
+    # Upgrade existing v0 PEM to v1 (adds public key if missing)
+    upgrade_identity_pem "${node_dir}/identity.pem"
   fi
-
-  # BLS keypair (via Arcium CLI)
   if [ ! -f "${node_dir}/bls-keypair.json" ]; then
-    arcium gen-bls-key "${node_dir}/bls-keypair.json"
-    info "  Created bls-keypair.json"
-  else
-    info "  bls-keypair.json already exists"
+    arcium gen-bls-key "${node_dir}/bls-keypair.json" >> "$VERBOSE_LOG" 2>&1
+  fi
+  if [ ! -f "${node_dir}/x25519-keypair.json" ]; then
+    arcium generate-x25519 --output "${node_dir}/x25519-keypair.json" >> "$VERBOSE_LOG" 2>&1
   fi
 
-  # X25519 keypair (via Arcium CLI)
-  if [ ! -f "${node_dir}/x25519-keypair.json" ]; then
-    arcium generate-x25519 --output "${node_dir}/x25519-keypair.json"
-    info "  Created x25519-keypair.json"
-  else
-    info "  x25519-keypair.json already exists"
+  # Remove directory placeholder if Docker created one, then generate config
+  if [ -d "${node_dir}/node-config.toml" ]; then
+    rm -rf "${node_dir}/node-config.toml"
   fi
+  cat > "${node_dir}/node-config.toml" << NCEOF
+[network]
+address = "${bind_ip}"
+
+[node]
+ending_epoch = 9223372036854775807
+hardware_claim = 0
+offset = ${node_offset}
+starting_epoch = 0
+
+[solana]
+cluster = "Localnet"
+endpoint_rpc = "http://${RPC_HOST}:8899"
+endpoint_wss = "ws://${RPC_HOST}:8900"
+
+[solana.commitment]
+commitment = "confirmed"
+NCEOF
 }
 
+task "Generating keys for ${NUM_NODES} cluster nodes + ${NUM_EXTRA_NODES} extra node(s)"
 for i in $(seq 1 $NUM_NODES); do
-  generate_node_keys "$i"
+  node_offset=$((NODE_OFFSET_START + i - 1))
+  ip_idx=$((i - 1))
+  generate_node_keys "$i" "$node_offset" "${NODE_IPS[$ip_idx]}"
 done
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  extra_num=$((NUM_NODES + i))
+  node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
+  ip_idx=$((i - 1))
+  generate_node_keys "$extra_num" "$node_offset" "${EXTRA_NODE_IPS[$ip_idx]}"
+done
+ok "$((NUM_NODES + NUM_EXTRA_NODES)) node key sets ready"
+
+# --- Trusted Dealer keypair + seed ---
+task "Generating trusted dealer keys"
+mkdir -p "$TD_DIR"
+
+if [ ! -f "${TD_DIR}/td_identity.pem" ]; then
+  generate_identity_pem "${TD_DIR}/td_identity.pem"
+else
+  # Upgrade existing v0 PEM to v1 (adds public key if missing)
+  upgrade_identity_pem "${TD_DIR}/td_identity.pem"
+fi
+if [ ! -f "${TD_DIR}/td_master_seed.json" ]; then
+  # Generate 32 random bytes as a JSON array (matching arcium localnet format)
+  python3 -c "import os, json; print(json.dumps(list(os.urandom(32))))" > "${TD_DIR}/td_master_seed.json"
+fi
+ok "Trusted dealer keys ready"
+
+# --- Generate trusted dealer config ---
+task "Generating trusted dealer config"
+cat > "${TD_DIR}/trusted_dealer_config.toml" << TDEOF
+[dealer]
+cluster_offsets = [${CLUSTER_OFFSET}]
+local_ip = "172.20.0.99"
+master_seed_path = "/usr/trusted-dealer/master_seed.json"
+n_peers = ${NUM_NODES}
+private_key_path = "/usr/trusted-dealer/identity.json"
+rate_limit_initial_tokens = 10000000
+rate_limit_max_tokens = 10000000
+rate_limit_tokens_per_second = 100000
+solana_rpc_url = "http://${RPC_HOST}:8899"
+TDEOF
+ok "Trusted dealer config generated"
+
+step_done
 
 # =========================================================================
-# STEP 3: Start Surfpool + Docker ARX nodes
+# STEP 3: Build program (runs in parallel with Steps 4-6)
 # =========================================================================
-log "Step 3: Starting Surfpool + Docker services ..."
+BUILD_LOG="${PROJECT_ROOT}/logs/arcium-build.log"
+BUILD_PID=""
 
-# Stop any existing processes first
-if [ -x "${PROJECT_ROOT}/scripts/dev-stop.sh" ]; then
-  "${PROJECT_ROOT}/scripts/dev-stop.sh" 2>/dev/null || true
+if [ "$SKIP_BUILD" = false ]; then
+  step_start 3 "Building program (background)"
+  task "Running arcium build in background"
+  cd "$PROJECT_ROOT"
+  (
+    arcium build >> "$BUILD_LOG" 2>&1
+  ) &
+  BUILD_PID=$!
+  ok "Build started in background (PID ${BUILD_PID})"
+  step_done
+else
+  echo -e "${DIM}[$(elapsed)] Step 3: Skipped (--skip-build)${RESET}" >&2
+  echo "" >&2
 fi
 
-# Start Surfpool with airdrop to admin keypair
-mkdir -p "${PROJECT_ROOT}/.pids" "${PROJECT_ROOT}/logs"
-SURFPOOL_LOG="${PROJECT_ROOT}/logs/surfpool.log"
+# =========================================================================
+# STEP 4: Start Surfpool (parallel with build)
+# =========================================================================
+step_start 4 "Starting Surfpool"
 
-# Calculate airdrop amount: 100 SOL = 100_000_000_000 lamports
+# Stop any existing processes first
+task "Stopping existing processes"
+if [ -x "${PROJECT_ROOT}/scripts/dev-stop.sh" ]; then
+  "${PROJECT_ROOT}/scripts/dev-stop.sh" >> "$VERBOSE_LOG" 2>&1 || true
+fi
+lsof -ti:8899 | xargs kill -9 2>/dev/null || true
+sleep 1
+
+SURFPOOL_LOG="${PROJECT_ROOT}/logs/surfpool.log"
 AIRDROP_LAMPORTS=100000000000
 
+task "Starting Surfpool validator"
+SURFPOOL_EXTRA_ARGS=()
+if [ -n "$DOCKER_SSH" ]; then
+  SURFPOOL_EXTRA_ARGS+=(--host 0.0.0.0)
+  ok "Surfpool will bind 0.0.0.0 (reachable from remote Docker at ${MAC_LAN_IP})"
+fi
 surfpool start \
   --db "${PROJECT_ROOT}/dev.sqlite" \
-  --block-production-mode transaction \
+  --block-production-mode clock \
   --port 8899 \
   --no-tui \
+  --no-deploy \
   --airdrop-keypair-path "$ADMIN_KP" \
   --airdrop-amount "$AIRDROP_LAMPORTS" \
+  ${SURFPOOL_EXTRA_ARGS[@]+"${SURFPOOL_EXTRA_ARGS[@]}"} \
   > "$SURFPOOL_LOG" 2>&1 &
 
 SURFPOOL_PID=$!
 echo "${SURFPOOL_PID}" > "${PROJECT_ROOT}/.pids/surfpool.pid"
-info "Surfpool started (PID ${SURFPOOL_PID}). Logs: ${SURFPOOL_LOG}"
+ok "Surfpool started (PID ${SURFPOOL_PID})"
 
 wait_for_rpc 60 || fail "Surfpool did not become healthy. Check ${SURFPOOL_LOG}"
 
-# Airdrop to ARX node keypairs (they need SOL for on-chain txs)
-for i in $(seq 1 $NUM_NODES); do
+# Fund all ARX node keypairs in parallel (cluster + extra)
+TOTAL_NODES=$((NUM_NODES + NUM_EXTRA_NODES))
+task "Airdropping SOL to ${TOTAL_NODES} nodes"
+AIRDROP_PIDS=()
+for i in $(seq 1 $TOTAL_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
-  airdrop_sol "${node_dir}/node-keypair.json" 100
-  airdrop_sol "${node_dir}/callback-kp.json" 100
+  airdrop_sol "${node_dir}/node-keypair.json" 100 &
+  AIRDROP_PIDS+=($!)
+  airdrop_sol "${node_dir}/callback-kp.json" 100 &
+  AIRDROP_PIDS+=($!)
 done
+run_parallel "Airdropping SOL to nodes" "${AIRDROP_PIDS[@]}"
+ok "All airdrops complete"
+
+step_done
 
 # =========================================================================
-# STEP 4: Initialize Arcium network on Surfpool
+# STEP 5: Initialize Arcium network on Surfpool
 # =========================================================================
-log "Step 4: Initializing Arcium network on Surfpool ..."
+step_start 5 "Initializing Arcium network"
 
-# 4a. Deploy Arcium network program
-info "Running init-arcium-network ..."
+# 5a. Deploy Arcium network programs
+task "Deploying Arcium network programs"
 arcium init-arcium-network \
   --keypair-path "$ADMIN_KP" \
-  --rpc-url "$RPC_URL" || {
-    info "init-arcium-network may have already been run (OK if re-running)."
+  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "init-arcium-network may have already been run (OK if re-running)"
   }
+ok "Arcium network initialized"
 
-# 4b. Initialize ARX node accounts on-chain
+# 5b. Initialize all ARX node accounts on-chain (cluster + extra, parallel)
+task "Initializing on-chain accounts for ${TOTAL_NODES} nodes"
+NODE_PIDS=()
 for i in $(seq 1 $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
-  node_offset=$((i - 1))
-  ip="${NODE_IPS[$node_offset]}"
+  node_offset=$((NODE_OFFSET_START + i - 1))
+  ip_idx=$((i - 1))
+  ip="${NODE_IPS[$ip_idx]}"
 
-  info "Initializing on-chain accounts for ARX node ${i} (offset=${node_offset}, ip=${ip}) ..."
-  arcium init-arx-accs \
-    --keypair-path "${node_dir}/node-keypair.json" \
-    --callback-keypair-path "${node_dir}/callback-kp.json" \
-    --peer-keypair-path "${node_dir}/identity.pem" \
-    --bls-keypair-path "${node_dir}/bls-keypair.json" \
-    --x25519-keypair-path "${node_dir}/x25519-keypair.json" \
-    --node-offset "$node_offset" \
-    --ip-address "$ip" \
-    --rpc-url "$RPC_URL" || {
-      info "init-arx-accs for node ${i} may have already been run (OK if re-running)."
-    }
+  (
+    arcium init-arx-accs \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --callback-keypair-path "${node_dir}/callback-kp.json" \
+      --peer-keypair-path "${node_dir}/identity.pem" \
+      --bls-keypair-path "${node_dir}/bls-keypair.json" \
+      --x25519-keypair-path "${node_dir}/x25519-keypair.json" \
+      --node-offset "$node_offset" \
+      --ip-address "$ip" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  NODE_PIDS+=($!)
 done
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  extra_num=$((NUM_NODES + i))
+  node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
+  node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
+  ip_idx=$((i - 1))
+  ip="${EXTRA_NODE_IPS[$ip_idx]}"
 
-# 4c. Create cluster
-info "Creating cluster (offset=${CLUSTER_OFFSET}, max-nodes=${NUM_NODES}) ..."
+  (
+    arcium init-arx-accs \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --callback-keypair-path "${node_dir}/callback-kp.json" \
+      --peer-keypair-path "${node_dir}/identity.pem" \
+      --bls-keypair-path "${node_dir}/bls-keypair.json" \
+      --x25519-keypair-path "${node_dir}/x25519-keypair.json" \
+      --node-offset "$node_offset" \
+      --ip-address "$ip" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  NODE_PIDS+=($!)
+done
+run_parallel "Initializing ARX node accounts" "${NODE_PIDS[@]}"
+ok "All node accounts initialized"
+
+# Get trusted dealer peer ID for cluster registration
+# NOTE: arcium CLI expects IP and peer ID in byte-array format: [a,b,c,d]
+TD_PEER_ID=$(arcium get-peer-id "${TD_DIR}/td_identity.pem" 2>/dev/null)
+task "Trusted dealer peer ID: ${TD_PEER_ID}"
+
+# 5c. Create main cluster
+task "Creating main cluster (offset=${CLUSTER_OFFSET})"
 arcium init-cluster \
   --keypair-path "$ADMIN_KP" \
   --offset "$CLUSTER_OFFSET" \
   --max-nodes "$NUM_NODES" \
-  --rpc-url "$RPC_URL" || {
-    info "Cluster may already exist (OK if re-running)."
+  --td-ip "[172,20,0,99]" \
+  --td-p-id "$TD_PEER_ID" \
+  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "Cluster may already exist (OK if re-running)"
   }
+ok "Main cluster created"
 
-# 4d. Propose and accept each node into the cluster
+# 5d. Propose all nodes, then accept all (parallel within each batch)
+task "Proposing ${NUM_NODES} nodes to main cluster"
+PROPOSE_PIDS=()
+for i in $(seq 1 $NUM_NODES); do
+  node_offset=$((NODE_OFFSET_START + i - 1))
+  (
+    arcium propose-join-cluster \
+      --keypair-path "$ADMIN_KP" \
+      --cluster-offset "$CLUSTER_OFFSET" \
+      --node-offset "$node_offset" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  PROPOSE_PIDS+=($!)
+done
+run_parallel "Proposing nodes to cluster" "${PROPOSE_PIDS[@]}"
+
+task "Nodes accepting main cluster join"
+JOIN_PIDS=()
 for i in $(seq 1 $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
-  node_offset=$((i - 1))
-
-  info "Proposing node ${i} (offset=${node_offset}) to join cluster ${CLUSTER_OFFSET} ..."
-  arcium propose-join-cluster \
-    --keypair-path "$ADMIN_KP" \
-    --cluster-offset "$CLUSTER_OFFSET" \
-    --node-offset "$node_offset" \
-    --rpc-url "$RPC_URL" || {
-      info "Propose for node ${i} may have already been done."
-    }
-
-  info "Node ${i} accepting cluster join ..."
-  arcium join-cluster true \
-    --keypair-path "${node_dir}/node-keypair.json" \
-    --node-offset "$node_offset" \
-    --cluster-offset "$CLUSTER_OFFSET" \
-    --rpc-url "$RPC_URL" || {
-      info "Join for node ${i} may have already been done."
-    }
+  node_offset=$((NODE_OFFSET_START + i - 1))
+  (
+    arcium join-cluster true \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --node-offset "$node_offset" \
+      --cluster-offset "$CLUSTER_OFFSET" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  JOIN_PIDS+=($!)
 done
+run_parallel "Nodes joining cluster" "${JOIN_PIDS[@]}"
+ok "All nodes joined main cluster"
 
-# 4e. Submit aggregated BLS key (each node submits)
+# 5e. Submit aggregated BLS key (each node submits, parallel)
+task "Submitting aggregated BLS keys for main cluster"
+BLS_PIDS=()
 for i in $(seq 1 $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
-  node_offset=$((i - 1))
+  node_offset=$((NODE_OFFSET_START + i - 1))
 
-  info "Node ${i} submitting aggregated BLS key ..."
-  arcium submit-aggregated-bls-key \
-    --keypair-path "${node_dir}/node-keypair.json" \
-    --cluster-offset "$CLUSTER_OFFSET" \
-    --node-offset "$node_offset" \
-    --rpc-url "$RPC_URL" || {
-      info "BLS key submission for node ${i} may have already been done."
-    }
+  (
+    arcium submit-aggregated-bls-key \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --cluster-offset "$CLUSTER_OFFSET" \
+      --node-offset "$node_offset" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  BLS_PIDS+=($!)
 done
+run_parallel "Submitting BLS keys" "${BLS_PIDS[@]}"
+ok "BLS keys submitted"
 
-# 4f. Activate the cluster
-info "Activating cluster ${CLUSTER_OFFSET} ..."
+# 5f. Activate the main cluster
+task "Activating main cluster"
 arcium activate-cluster \
   --keypair-path "$ADMIN_KP" \
   --cluster-offset "$CLUSTER_OFFSET" \
-  --rpc-url "$RPC_URL" || {
-    info "Cluster may already be active."
+  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "Cluster may already be active"
   }
+ok "Main cluster active"
 
-# 4g. Start Docker ARX nodes (now that on-chain accounts exist)
-info "Starting Docker services (ARX nodes + Postgres) ..."
-if ! command -v docker &>/dev/null; then
-  fail "docker not found. Install Docker to run ARX nodes."
+# 5g. Create recovery cluster for extra node(s) — ARX nodes must belong to a cluster to boot
+task "Creating recovery cluster (offset=${RECOVERY_CLUSTER_OFFSET})"
+arcium init-cluster \
+  --keypair-path "$ADMIN_KP" \
+  --offset "$RECOVERY_CLUSTER_OFFSET" \
+  --max-nodes "$NUM_EXTRA_NODES" \
+  --td-ip "[172,20,0,99]" \
+  --td-p-id "$TD_PEER_ID" \
+  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "Recovery cluster may already exist (OK if re-running)"
+  }
+ok "Recovery cluster created"
+
+# 5h. Propose extra nodes to recovery cluster, accept, submit BLS, activate
+task "Proposing ${NUM_EXTRA_NODES} extra node(s) to recovery cluster"
+EXTRA_PROPOSE_PIDS=()
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
+  (
+    arcium propose-join-cluster \
+      --keypair-path "$ADMIN_KP" \
+      --cluster-offset "$RECOVERY_CLUSTER_OFFSET" \
+      --node-offset "$node_offset" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  EXTRA_PROPOSE_PIDS+=($!)
+done
+run_parallel "Proposing extra nodes to recovery cluster" "${EXTRA_PROPOSE_PIDS[@]}"
+
+task "Extra nodes accepting recovery cluster join"
+EXTRA_JOIN_PIDS=()
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  extra_num=$((NUM_NODES + i))
+  node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
+  node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
+  (
+    arcium join-cluster true \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --node-offset "$node_offset" \
+      --cluster-offset "$RECOVERY_CLUSTER_OFFSET" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  EXTRA_JOIN_PIDS+=($!)
+done
+run_parallel "Extra nodes joining recovery cluster" "${EXTRA_JOIN_PIDS[@]}"
+ok "Extra nodes joined recovery cluster"
+
+task "Submitting BLS keys for recovery cluster"
+EXTRA_BLS_PIDS=()
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  extra_num=$((NUM_NODES + i))
+  node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
+  node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
+  (
+    arcium submit-aggregated-bls-key \
+      --keypair-path "${node_dir}/node-keypair.json" \
+      --cluster-offset "$RECOVERY_CLUSTER_OFFSET" \
+      --node-offset "$node_offset" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  EXTRA_BLS_PIDS+=($!)
+done
+run_parallel "Submitting BLS keys for recovery cluster" "${EXTRA_BLS_PIDS[@]}"
+ok "Recovery cluster BLS keys submitted"
+
+task "Activating recovery cluster"
+arcium activate-cluster \
+  --keypair-path "$ADMIN_KP" \
+  --cluster-offset "$RECOVERY_CLUSTER_OFFSET" \
+  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "Recovery cluster may already be active"
+  }
+ok "Recovery cluster active"
+
+step_done
+
+# =========================================================================
+# STEP 6: Start Docker ARX nodes
+# =========================================================================
+step_start 6 "Starting Docker ARX nodes"
+
+if [ -z "$DOCKER_SSH" ]; then
+  if ! command -v docker &>/dev/null; then
+    fail "docker not found. Install Docker to run ARX nodes."
+  fi
 fi
-docker compose -f "${PROJECT_ROOT}/docker-compose.yml" up -d
-info "Docker services started."
 
-# =========================================================================
-# STEP 5: Build the program
-# =========================================================================
-if [ "$SKIP_BUILD" = false ]; then
-  log "Step 5: Building program with arcium build ..."
-  cd "$PROJECT_ROOT"
-  arcium build
-  info "Build complete."
+# Sync configs to remote before any Docker operations
+sync_to_remote
+
+task "Cleaning up old Docker resources"
+if [ -n "$DOCKER_SSH" ]; then
+  docker_cmd "docker compose -f docker-compose.yml down" >> "$VERBOSE_LOG" 2>&1 || true
+  docker_cmd 'for net in $(docker network ls --filter driver=bridge --format "{{.Name}}" 2>/dev/null); do
+    subnet=$(docker network inspect "$net" --format "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null || echo "")
+    if [ "$subnet" = "172.20.0.0/16" ]; then docker network rm "$net" 2>/dev/null || true; fi
+  done' >> "$VERBOSE_LOG" 2>&1 || true
 else
-  log "Step 5: Skipping build (--skip-build)"
+  docker compose -f "${PROJECT_ROOT}/docker-compose.yml" down >> "$VERBOSE_LOG" 2>&1 || true
+  for net in $(docker network ls --filter driver=bridge --format '{{.Name}}' 2>/dev/null); do
+    subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "")
+    if [ "$subnet" = "172.20.0.0/16" ]; then
+      docker network rm "$net" >> "$VERBOSE_LOG" 2>&1 || true
+    fi
+  done
+fi
+
+task "Running docker compose up"
+if [ -n "$DOCKER_SSH" ]; then
+  # On remote, compose may exit non-zero if health checks fail initially (e.g. ARX nodes
+  # can't reach Surfpool yet). The health-check loop below handles retries, so don't die here.
+  docker_cmd "docker compose -f docker-compose.yml up -d" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "docker compose up exited with error on remote — checking container status"
+    docker_cmd "docker compose -f docker-compose.yml ps" >> "$VERBOSE_LOG" 2>&1 || true
+    docker_cmd "docker logs ef-arx-node-1 2>&1 | tail -30" >> "$VERBOSE_LOG" 2>&1 || true
+  }
+else
+  docker compose -f "${PROJECT_ROOT}/docker-compose.yml" up -d >> "$VERBOSE_LOG" 2>&1
+fi
+ok "Docker services started (or starting)"
+
+# Wait for all nodes (including extra nodes outside the cluster) to become active
+task "Waiting for all ARX nodes to become active"
+ALL_OFFSETS=()
+for i in $(seq 1 $NUM_NODES); do
+  ALL_OFFSETS+=($((NODE_OFFSET_START + i - 1)))
+done
+for i in $(seq 1 $NUM_EXTRA_NODES); do
+  ALL_OFFSETS+=($((EXTRA_NODE_OFFSET_START + i - 1)))
+done
+
+ARX_ACTIVE_MAX=60
+ARX_ACTIVE_ATTEMPT=0
+ALL_ACTIVE=false
+while [ $ARX_ACTIVE_ATTEMPT -lt $ARX_ACTIVE_MAX ]; do
+  ALL_ACTIVE=true
+  for offset in "${ALL_OFFSETS[@]}"; do
+    if ! arcium arx-active --rpc-url "$RPC_URL" "$offset" 2>/dev/null | grep -qi "true"; then
+      ALL_ACTIVE=false
+      break
+    fi
+  done
+  if [ "$ALL_ACTIVE" = true ]; then
+    break
+  fi
+  ARX_ACTIVE_ATTEMPT=$((ARX_ACTIVE_ATTEMPT + 1))
+  sleep 5
+done
+if [ "$ALL_ACTIVE" = true ]; then
+  ok "All ${#ALL_OFFSETS[@]} ARX nodes are active"
+else
+  warn "Not all nodes became active after $((ARX_ACTIVE_MAX * 5))s — deploy may fail"
+  for offset in "${ALL_OFFSETS[@]}"; do
+    status=$(arcium arx-active --rpc-url "$RPC_URL" "$offset" 2>&1 || echo "error")
+    echo -e "  ${DIM}  offset ${offset}: ${status}${RESET}" >&2
+  done
+fi
+
+# Pull container logs back from remote for debugging
+sync_logs_from_remote
+
+step_done
+
+# =========================================================================
+# WAIT: Ensure build has finished before deploying
+# =========================================================================
+if [ -n "$BUILD_PID" ]; then
+  task "Waiting for background build to finish (PID ${BUILD_PID})"
+  if wait "$BUILD_PID"; then
+    ok "Background build completed successfully"
+  else
+    fail "arcium build failed. Check ${BUILD_LOG}"
+  fi
+  BUILD_PID=""
 fi
 
 # =========================================================================
-# STEP 6: Deploy program + circuits
+# STEP 7: Deploy program + Initialize MXE
 # =========================================================================
 if [ "$SKIP_DEPLOY" = false ]; then
-  log "Step 6: Deploying program ..."
+  step_start 7 "Deploying program & initializing MXE"
 
   # Load .env if it exists (for CIRCUIT_BUCKET, CIRCUIT_BASE_URL)
   if [ -f "${PROJECT_ROOT}/.env" ]; then
@@ -334,102 +920,147 @@ if [ "$SKIP_DEPLOY" = false ]; then
     set +a
   fi
 
-  # Deploy the game program + initialize MXE
-  info "Deploying program and initializing MXE ..."
-  arcium deploy \
+  task "Deploying program and initializing MXE"
+  DEPLOY_OK=false
+  if arcium deploy \
     --keypair-path "$ADMIN_KP" \
     --cluster-offset "$CLUSTER_OFFSET" \
-    --recovery-set-size "$NUM_NODES" \
+    --recovery-set-size "$RECOVERY_SET_SIZE" \
     --program-name encrypted_forest \
-    --rpc-url "$RPC_URL"
-  info "Program deployed and MXE initialized."
-
-  # Finalize MXE keys (triggers DKG on the running ARX nodes)
-  PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo "")
-  if [ -n "$PROGRAM_ID" ]; then
-    info "Finalizing MXE keys for program ${PROGRAM_ID} ..."
-    arcium finalize-mxe-keys "$PROGRAM_ID" \
-      --keypair-path "$ADMIN_KP" \
-      --cluster-offset "$CLUSTER_OFFSET" \
-      --rpc-url "$RPC_URL" || {
-        info "finalize-mxe-keys may need ARX nodes to complete DKG. Check Docker logs."
-      }
+    --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
+    DEPLOY_OK=true
+    ok "Program deployed and MXE initialized"
   else
-    info "WARNING: Could not determine program ID. Skipping finalize-mxe-keys."
-    info "Run manually: arcium finalize-mxe-keys <PROGRAM_ID> --keypair-path admin.json --cluster-offset 0 --rpc-url $RPC_URL"
+    warn "arcium deploy exited with error (likely Surfpool timing issue)"
+    task "Retrying MXE init after deploy timing issue"
+    sleep 5
+    PROGRAM_ID_RETRY=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json")
+    if arcium init-mxe \
+      --callback-program "$PROGRAM_ID_RETRY" \
+      --cluster-offset "$CLUSTER_OFFSET" \
+      --recovery-set-size "$RECOVERY_SET_SIZE" \
+      --keypair-path "$ADMIN_KP" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
+      DEPLOY_OK=true
+      ok "MXE initialized via fallback"
+    else
+      warn "MXE init also failed — check ${VERBOSE_LOG} for details"
+      warn "Retry manually: arcium init-mxe --callback-program \$(solana address --keypair target/deploy/encrypted_forest-keypair.json) --cluster-offset $CLUSTER_OFFSET --recovery-set-size $RECOVERY_SET_SIZE --keypair-path admin.json --rpc-url $RPC_URL"
+    fi
+  fi
+
+  # Finalize MXE keys — ARX nodes must complete DKG first, so retry with backoff
+  # Only attempt if deploy/init-mxe actually succeeded (MXE account must exist)
+  PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo "")
+  if [ "$DEPLOY_OK" = true ] && [ -n "$PROGRAM_ID" ]; then
+    task "Waiting for DKG completion, then finalizing MXE keys"
+    FINALIZE_MAX=30
+    FINALIZE_ATTEMPT=0
+    FINALIZE_OK=false
+    while [ $FINALIZE_ATTEMPT -lt $FINALIZE_MAX ]; do
+      if arcium finalize-mxe-keys "$PROGRAM_ID" \
+           --keypair-path "$ADMIN_KP" \
+           --cluster-offset "$CLUSTER_OFFSET" \
+           --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
+        FINALIZE_OK=true
+        break
+      fi
+      FINALIZE_ATTEMPT=$((FINALIZE_ATTEMPT + 1))
+      sleep 10
+    done
+    if [ "$FINALIZE_OK" = true ]; then
+      ok "MXE keys finalized"
+    else
+      warn "finalize-mxe-keys failed after ${FINALIZE_MAX} attempts"
+      warn "Retry manually: arcium finalize-mxe-keys ${PROGRAM_ID} --keypair-path admin.json --cluster-offset 0 --rpc-url $RPC_URL"
+    fi
+  else
+    warn "Could not determine program ID. Skipping finalize-mxe-keys."
+    warn "Run manually: arcium finalize-mxe-keys <PROGRAM_ID> --keypair-path admin.json --cluster-offset 0 --rpc-url $RPC_URL"
   fi
 
   # Upload circuits to R2 (if CIRCUIT_BUCKET is set)
   if [ -n "${CIRCUIT_BUCKET:-}" ]; then
-    info "Uploading circuits to R2 bucket '${CIRCUIT_BUCKET}' ..."
-    "${PROJECT_ROOT}/scripts/upload-circuits.sh"
+    task "Uploading circuits to R2 bucket '${CIRCUIT_BUCKET}'"
+    "${PROJECT_ROOT}/scripts/upload-circuits.sh" >> "$VERBOSE_LOG" 2>&1
+    ok "Circuits uploaded"
   else
-    info "CIRCUIT_BUCKET not set. Skipping circuit upload."
-    info "Set CIRCUIT_BUCKET in .env to enable circuit uploads."
+    warn "CIRCUIT_BUCKET not set — skipping circuit upload"
   fi
 
   # Init computation definitions (if script exists)
   INIT_SCRIPT="${PROJECT_ROOT}/scripts/init-comp-defs.ts"
   if [ -f "$INIT_SCRIPT" ]; then
-    info "Initializing computation definitions ..."
+    task "Initializing computation definitions"
     cd "${PROJECT_ROOT}"
-    bun run "$INIT_SCRIPT"
-    info "Computation definitions initialized."
+    bun run "$INIT_SCRIPT" >> "$VERBOSE_LOG" 2>&1
+    ok "Computation definitions initialized"
   else
-    info "No init-comp-defs.ts found. Comp defs must be initialized via tests or manually."
+    warn "No init-comp-defs.ts found — comp defs must be initialized manually"
   fi
+
+  step_done
 else
-  log "Step 6: Skipping deploy (--skip-deploy)"
+  echo -e "${DIM}[$(elapsed)] Step 7: Skipped (--skip-deploy)${RESET}" >&2
+  echo "" >&2
 fi
 
 # =========================================================================
-# STEP 7: Copy IDL into SDK folders
+# STEP 8: Copy IDL into SDK folders
 # =========================================================================
-log "Step 7: Copying IDL to SDK packages ..."
+step_start 8 "Copying IDL to SDK packages"
 
 IDL_JSON="${PROJECT_ROOT}/target/idl/encrypted_forest.json"
 IDL_TYPES="${PROJECT_ROOT}/target/types/encrypted_forest.ts"
 
 if [ -f "$IDL_JSON" ]; then
-  # Copy IDL JSON
   mkdir -p "${PROJECT_ROOT}/sdk/core/src/idl"
   mkdir -p "${PROJECT_ROOT}/sdk/client/src/idl"
   cp "$IDL_JSON" "${PROJECT_ROOT}/sdk/core/src/idl/encrypted_forest.json"
   cp "$IDL_JSON" "${PROJECT_ROOT}/sdk/client/src/idl/encrypted_forest.json"
-  info "Copied encrypted_forest.json -> sdk/core/src/idl/ and sdk/client/src/idl/"
+  ok "IDL JSON copied to sdk/core and sdk/client"
 else
-  info "WARNING: IDL JSON not found at ${IDL_JSON}. Run arcium build first."
+  warn "IDL JSON not found at ${IDL_JSON} — run arcium build first"
 fi
 
 if [ -f "$IDL_TYPES" ]; then
-  # Copy TypeScript types
   cp "$IDL_TYPES" "${PROJECT_ROOT}/sdk/core/src/idl/encrypted_forest.ts"
   cp "$IDL_TYPES" "${PROJECT_ROOT}/sdk/client/src/idl/encrypted_forest.ts"
-  info "Copied encrypted_forest.ts -> sdk/core/src/idl/ and sdk/client/src/idl/"
+  ok "IDL types copied to sdk/core and sdk/client"
 else
-  info "WARNING: IDL types not found at ${IDL_TYPES}. Run arcium build first."
+  warn "IDL types not found at ${IDL_TYPES} — run arcium build first"
 fi
 
+step_done
+
 # =========================================================================
-# Summary
+# Final Summary
 # =========================================================================
-echo ""
-echo "=============================================="
-echo "  Encrypted Forest - Local Environment Ready  "
-echo "=============================================="
-echo ""
-echo "  Surfpool RPC  : ${RPC_URL}"
-echo "  Surfpool WS   : ws://localhost:8900"
-echo "  Admin keypair : ${ADMIN_KP}"
-echo "  Cluster       : offset=${CLUSTER_OFFSET}, nodes=${NUM_NODES}"
-echo "  Docker        : docker compose ps"
-echo ""
-echo "  Program ID    : $(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo 'unknown')"
-echo ""
-echo "  Next steps:"
-echo "    cd client && bun run dev    # Start the game client"
-echo "    make test-local             # Run tests against this env"
-echo ""
-echo "  Stop everything:"
-echo "    ./scripts/dev-stop.sh"
-echo ""
+stop_heartbeat
+
+FINAL_ELAPSED=$(elapsed)
+FINAL_PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo 'unknown')
+
+echo -e "" >&2
+echo -e "${BOLD}${GREEN}  ╔═══════════════════════════════════════════════════╗${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║   Encrypted Forest — Local Environment Ready     ║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ╠═══════════════════════════════════════════════════╣${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}                                                   ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Total time${RESET}    : ${CYAN}${FINAL_ELAPSED}${RESET}                          ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Program ID${RESET}    : ${DIM}${FINAL_PROGRAM_ID}${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Surfpool RPC${RESET}  : ${RPC_URL}                ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Surfpool WS${RESET}   : ws://localhost:8900          ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Admin keypair${RESET} : ${DIM}${ADMIN_KP}${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Cluster${RESET}       : offset=${CLUSTER_OFFSET}, nodes=${NUM_NODES}             ${BOLD}${GREEN}║${RESET}" >&2
+if [ -n "$DOCKER_SSH" ]; then
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Docker host${RESET}   : ${DOCKER_SSH}   ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Mac LAN IP${RESET}    : ${MAC_LAN_IP}                  ${BOLD}${GREEN}║${RESET}" >&2
+fi
+echo -e "${BOLD}${GREEN}  ║${RESET}                                                   ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}  ${BOLD}Next steps:${RESET}                                    ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}    ${CYAN}cd client && bun run dev${RESET}  — Start game client ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}    ${CYAN}make test-local${RESET}           — Run tests         ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}    ${CYAN}./scripts/dev-stop.sh${RESET}     — Stop everything   ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ║${RESET}                                                   ${BOLD}${GREEN}║${RESET}" >&2
+echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════╝${RESET}" >&2
+echo "" >&2

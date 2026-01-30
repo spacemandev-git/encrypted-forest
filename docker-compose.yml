@@ -1,122 +1,268 @@
 # docker-compose.yml - Encrypted Forest local dev environment
 #
 # Services:
-#   - postgres: Database for Arcium callback server
-#   - arx-node-1, arx-node-2: Arcium ARX MPC nodes (localnet requires 2)
+#   - arx-node-1..3: Arcium ARX MPC nodes (main cluster)
+#   - arx-node-4: Extra node (registered on-chain for recovery, not in cluster)
+#   - arcium-trusted-dealer: Key distribution for DKG
 #
 # NOTE: Surfpool runs natively (no Docker image available).
 #       Start it with: ./scripts/dev-start.sh
 #       This compose file provides the ARX node infrastructure that connects
 #       to Surfpool's RPC at host.docker.internal:8899.
 #
-# Usage:
-#   docker compose up -d       # Start ARX nodes + Postgres
-#   docker compose down        # Stop everything
-#   docker compose down -v     # Stop and remove volumes
+# Network:
+#   Custom bridge network "arcium-net" with subnet 172.20.0.0/16
+#   Main cluster nodes:     172.20.0.100 - 172.20.0.103
+#   Trusted Dealer:         172.20.0.99
 #
-# Prerequisites:
-#   - Install Arcium tooling: arcup install
-#   - Generate node keypairs (see Arcium node-setup guide)
-#   - Surfpool must be running on host port 8899
+# Usage:
+#   docker compose up -d       # Start ARX nodes
+#   docker compose down        # Stop everything
 
 services:
   # ---------------------------------------------------------------------------
-  # PostgreSQL - Required by Arcium callback server / ARX nodes
+  # Arcium Trusted Dealer
   # ---------------------------------------------------------------------------
-  postgres:
-    image: postgres:16-alpine
-    container_name: ef-postgres
-    environment:
-      POSTGRES_USER: arcium
-      POSTGRES_PASSWORD: arcium_dev
-      POSTGRES_DB: arcium_callback
-    ports:
-      - "5432:5432"
+  arcium-trusted-dealer:
+    image: arcium/trusted-dealer:latest
+    container_name: ef-trusted-dealer
+    restart: unless-stopped
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U arcium -d arcium_callback"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - type: bind
+        source: ./arx-keys/trusted-dealer/trusted_dealer_config.toml
+        target: /usr/trusted-dealer/trusted_dealer_config.toml
+        read_only: false
+      - type: bind
+        source: ./arx-keys/trusted-dealer/td_identity.pem
+        target: /usr/trusted-dealer/identity.json
+      - type: bind
+        source: ./arx-keys/trusted-dealer/td_master_seed.json
+        target: /usr/trusted-dealer/master_seed.json
+      - ./logs/trusted-dealer:/usr/trusted-dealer/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.99
 
   # ---------------------------------------------------------------------------
-  # ARX Node 1
+  # ARX Node 1 (Main Cluster)
   # ---------------------------------------------------------------------------
   arx-node-1:
-    image: arcium/arx-node
+    image: arcium/arx-node:latest
     container_name: ef-arx-node-1
-    depends_on:
-      postgres:
-        condition: service_healthy
+    restart: unless-stopped
     environment:
       NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
       NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      OPERATOR_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
       CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      NODE_CONFIG_PATH: /usr/arx-node/arx/node_config.toml
       BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
       X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
       ARX_METRICS_HOST: "0.0.0.0"
-      ARX_METRICS_PORT: "9091"
-    volumes:
-      - ./arx-keys/node-1/node-config.toml:/usr/arx-node/arx/node_config.toml:ro
-      - ./arx-keys/node-1/node-keypair.json:/usr/arx-node/node-keys/node_keypair.json:ro
-      - ./arx-keys/node-1/callback-kp.json:/usr/arx-node/node-keys/callback_authority_keypair.json:ro
-      - ./arx-keys/node-1/identity.pem:/usr/arx-node/node-keys/node_identity.pem:ro
-      - ./arx-keys/node-1/bls-keypair.json:/usr/arx-node/node-keys/bls_keypair.json:ro
-      - ./arx-keys/node-1/x25519-keypair.json:/usr/arx-node/node-keys/x25519_keypair.json:ro
-      - arx1-logs:/usr/arx-node/logs
-      - arx1-shares:/usr/arx-node/private-shares
-      - arx1-inputs:/usr/arx-node/public-inputs
     ports:
-      - "8001:8001"
-      - "8002:8002"
-      - "8012:8012"
-      - "8013:8013"
-      - "9091:9091"
+      - "127.0.0.1:9091:9091"
+    volumes:
+      - type: bind
+        source: ./arx-keys/node-1/node-config.toml
+        target: /usr/arx-node/arx/node_config.toml
+        read_only: false
+      - type: bind
+        source: ./arx-keys/node-1/node-keypair.json
+        target: /usr/arx-node/node-keys/node_keypair.json
+      - type: bind
+        source: ./arx-keys/node-1/node-keypair.json
+        target: /usr/arx-node/node-keys/operator_keypair.json
+      - type: bind
+        source: ./arx-keys/node-1/callback-kp.json
+        target: /usr/arx-node/node-keys/callback_authority_keypair.json
+      - type: bind
+        source: ./arx-keys/node-1/identity.pem
+        target: /usr/arx-node/node-keys/node_identity.pem
+      - ./logs/arx-node-1:/usr/arx-node/logs
+      - type: bind
+        source: ./arx-keys/node-1/bls-keypair.json
+        target: /usr/arx-node/node-keys/bls_keypair.json
+      - type: bind
+        source: ./arx-keys/node-1/x25519-keypair.json
+        target: /usr/arx-node/node-keys/x25519_keypair.json
+      - type: bind
+        source: ./arx-keys/node-1/private-shares
+        target: /usr/arx-node/private-shares
+      - type: bind
+        source: ./arx-keys/node-1/public-inputs
+        target: /usr/arx-node/public-inputs
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.100
 
   # ---------------------------------------------------------------------------
-  # ARX Node 2
+  # ARX Node 2 (Main Cluster)
   # ---------------------------------------------------------------------------
   arx-node-2:
-    image: arcium/arx-node
+    image: arcium/arx-node:latest
     container_name: ef-arx-node-2
-    depends_on:
-      postgres:
-        condition: service_healthy
+    restart: unless-stopped
     environment:
       NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
       NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      OPERATOR_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
       CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      NODE_CONFIG_PATH: /usr/arx-node/arx/node_config.toml
       BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
       X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
       ARX_METRICS_HOST: "0.0.0.0"
-      ARX_METRICS_PORT: "9092"
-    volumes:
-      - ./arx-keys/node-2/node-config.toml:/usr/arx-node/arx/node_config.toml:ro
-      - ./arx-keys/node-2/node-keypair.json:/usr/arx-node/node-keys/node_keypair.json:ro
-      - ./arx-keys/node-2/callback-kp.json:/usr/arx-node/node-keys/callback_authority_keypair.json:ro
-      - ./arx-keys/node-2/identity.pem:/usr/arx-node/node-keys/node_identity.pem:ro
-      - ./arx-keys/node-2/bls-keypair.json:/usr/arx-node/node-keys/bls_keypair.json:ro
-      - ./arx-keys/node-2/x25519-keypair.json:/usr/arx-node/node-keys/x25519_keypair.json:ro
-      - arx2-logs:/usr/arx-node/logs
-      - arx2-shares:/usr/arx-node/private-shares
-      - arx2-inputs:/usr/arx-node/public-inputs
     ports:
-      - "8003:8001"
-      - "8004:8002"
-      - "8014:8012"
-      - "8015:8013"
-      - "9092:9091"
+      - "127.0.0.1:9092:9091"
+    volumes:
+      - type: bind
+        source: ./arx-keys/node-2/node-config.toml
+        target: /usr/arx-node/arx/node_config.toml
+        read_only: false
+      - type: bind
+        source: ./arx-keys/node-2/node-keypair.json
+        target: /usr/arx-node/node-keys/node_keypair.json
+      - type: bind
+        source: ./arx-keys/node-2/node-keypair.json
+        target: /usr/arx-node/node-keys/operator_keypair.json
+      - type: bind
+        source: ./arx-keys/node-2/callback-kp.json
+        target: /usr/arx-node/node-keys/callback_authority_keypair.json
+      - type: bind
+        source: ./arx-keys/node-2/identity.pem
+        target: /usr/arx-node/node-keys/node_identity.pem
+      - ./logs/arx-node-2:/usr/arx-node/logs
+      - type: bind
+        source: ./arx-keys/node-2/bls-keypair.json
+        target: /usr/arx-node/node-keys/bls_keypair.json
+      - type: bind
+        source: ./arx-keys/node-2/x25519-keypair.json
+        target: /usr/arx-node/node-keys/x25519_keypair.json
+      - type: bind
+        source: ./arx-keys/node-2/private-shares
+        target: /usr/arx-node/private-shares
+      - type: bind
+        source: ./arx-keys/node-2/public-inputs
+        target: /usr/arx-node/public-inputs
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.101
 
-volumes:
-  pgdata:
-  arx1-logs:
-  arx1-shares:
-  arx1-inputs:
-  arx2-logs:
-  arx2-shares:
-  arx2-inputs:
+  # ---------------------------------------------------------------------------
+  # ARX Node 3 (Main Cluster)
+  # ---------------------------------------------------------------------------
+  arx-node-3:
+    image: arcium/arx-node:latest
+    container_name: ef-arx-node-3
+    restart: unless-stopped
+    environment:
+      NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
+      NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      OPERATOR_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      NODE_CONFIG_PATH: /usr/arx-node/arx/node_config.toml
+      BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
+      X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
+      ARX_METRICS_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:9093:9091"
+    volumes:
+      - type: bind
+        source: ./arx-keys/node-3/node-config.toml
+        target: /usr/arx-node/arx/node_config.toml
+        read_only: false
+      - type: bind
+        source: ./arx-keys/node-3/node-keypair.json
+        target: /usr/arx-node/node-keys/node_keypair.json
+      - type: bind
+        source: ./arx-keys/node-3/node-keypair.json
+        target: /usr/arx-node/node-keys/operator_keypair.json
+      - type: bind
+        source: ./arx-keys/node-3/callback-kp.json
+        target: /usr/arx-node/node-keys/callback_authority_keypair.json
+      - type: bind
+        source: ./arx-keys/node-3/identity.pem
+        target: /usr/arx-node/node-keys/node_identity.pem
+      - ./logs/arx-node-3:/usr/arx-node/logs
+      - type: bind
+        source: ./arx-keys/node-3/bls-keypair.json
+        target: /usr/arx-node/node-keys/bls_keypair.json
+      - type: bind
+        source: ./arx-keys/node-3/x25519-keypair.json
+        target: /usr/arx-node/node-keys/x25519_keypair.json
+      - type: bind
+        source: ./arx-keys/node-3/private-shares
+        target: /usr/arx-node/private-shares
+      - type: bind
+        source: ./arx-keys/node-3/public-inputs
+        target: /usr/arx-node/public-inputs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.102
+
+  # ---------------------------------------------------------------------------
+  # ARX Node 4 (Extra — registered on-chain for recovery, not in main cluster)
+  # ---------------------------------------------------------------------------
+  arx-node-4:
+    image: arcium/arx-node:latest
+    container_name: ef-arx-node-4
+    restart: unless-stopped
+    environment:
+      NODE_IDENTITY_FILE: /usr/arx-node/node-keys/node_identity.pem
+      NODE_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      OPERATOR_KEYPAIR_FILE: /usr/arx-node/node-keys/node_keypair.json
+      CALLBACK_AUTHORITY_KEYPAIR_FILE: /usr/arx-node/node-keys/callback_authority_keypair.json
+      NODE_CONFIG_PATH: /usr/arx-node/arx/node_config.toml
+      BLS_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/bls_keypair.json
+      X25519_PRIVATE_KEY_FILE: /usr/arx-node/node-keys/x25519_keypair.json
+      ARX_METRICS_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:9094:9091"
+    volumes:
+      - type: bind
+        source: ./arx-keys/node-4/node-config.toml
+        target: /usr/arx-node/arx/node_config.toml
+        read_only: false
+      - type: bind
+        source: ./arx-keys/node-4/node-keypair.json
+        target: /usr/arx-node/node-keys/node_keypair.json
+      - type: bind
+        source: ./arx-keys/node-4/node-keypair.json
+        target: /usr/arx-node/node-keys/operator_keypair.json
+      - type: bind
+        source: ./arx-keys/node-4/callback-kp.json
+        target: /usr/arx-node/node-keys/callback_authority_keypair.json
+      - type: bind
+        source: ./arx-keys/node-4/identity.pem
+        target: /usr/arx-node/node-keys/node_identity.pem
+      - ./logs/arx-node-4:/usr/arx-node/logs
+      - type: bind
+        source: ./arx-keys/node-4/bls-keypair.json
+        target: /usr/arx-node/node-keys/bls_keypair.json
+      - type: bind
+        source: ./arx-keys/node-4/x25519-keypair.json
+        target: /usr/arx-node/node-keys/x25519_keypair.json
+      - type: bind
+        source: ./arx-keys/node-4/private-shares
+        target: /usr/arx-node/private-shares
+      - type: bind
+        source: ./arx-keys/node-4/public-inputs
+        target: /usr/arx-node/public-inputs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.103
+
+networks:
+  arcium-net:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

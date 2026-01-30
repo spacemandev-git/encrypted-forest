@@ -56,8 +56,7 @@ encrypted-forest.main/
 
 ### Surfpool Configuration
 
-- Start: `surfpool start --db ./dev.sqlite --block-production-mode transaction --port 8899`
-- Transaction-only blocks = low footprint, blocks only on activity
+- Start: `surfpool start --db ./dev.sqlite --block-production-mode clock --port 8899`
 - SQLite persistence across restarts
 - Must configure Arcium to use Surfpool RPC instead of its own validator
 
@@ -112,7 +111,7 @@ infra-agent ────┘
 - `arcium build` - Build program + encrypted instructions
 - `arcium test` - Run tests (default: local cluster)
 - `arcium test --cluster devnet` - Test against devnet
-- `surfpool start --db ./dev.sqlite --block-production-mode transaction` - Start local validator
+- `surfpool start --db ./dev.sqlite --block-production-mode clock` - Start local validator
 - `bun test` - Run SDK/client tests
 - `bun install` - Install dependencies (NOT npm install)
 
