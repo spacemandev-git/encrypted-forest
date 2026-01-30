@@ -192,6 +192,15 @@ export {
 } from "./subscriptions/logs.js";
 
 // ---------------------------------------------------------------------------
+// IDL
+// ---------------------------------------------------------------------------
+
+// Re-exported so downstream packages import from core, not their own copies.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — resolveJsonModule handles this
+export { default as idlJson } from "./idl/encrypted_forest.json";
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 

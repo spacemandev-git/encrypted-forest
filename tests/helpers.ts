@@ -887,9 +887,6 @@ export function buildProcessMoveValues(
   sourceY: bigint,
   targetX: bigint,
   targetY: bigint,
-  currentSlot: bigint,
-  gameSpeed: bigint,
-  lastUpdatedSlot: bigint,
 ): bigint[] {
   return [
     playerId,
@@ -900,9 +897,6 @@ export function buildProcessMoveValues(
     BigInt.asUintN(64, sourceY),
     BigInt.asUintN(64, targetX),
     BigInt.asUintN(64, targetY),
-    currentSlot,
-    gameSpeed,
-    lastUpdatedSlot,
   ];
 }
 
@@ -1127,6 +1121,8 @@ export async function queueProcessMove(
   sourcePending: PublicKey,
   targetPending: PublicKey,
   landingSlot: bigint,
+  currentShips: bigint,
+  currentMetal: bigint,
   moveValues: bigint[],
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN }> {
@@ -1146,6 +1142,8 @@ export async function queueProcessMove(
     .queueProcessMove(
       computationOffset,
       new BN(landingSlot.toString()),
+      new BN(currentShips.toString()),
+      new BN(currentMetal.toString()),
       Buffer.from(movePacked) as any,
       Array.from(encCtx.publicKey) as any,
       new BN(moveNonceValue.toString()),

@@ -68,7 +68,6 @@ clean:
 	@echo "Cleaning build artifacts..."
 	-rm -rf target/
 	-rm -rf .anchor/
-	-rm -rf node_modules/
 	-rm -f dev.sqlite dev.sqlite-wal dev.sqlite-shm
 	-rm -f test.sqlite test.sqlite-wal test.sqlite-shm
 	-rm -rf logs/

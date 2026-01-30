@@ -12,8 +12,9 @@
 #   4. Start Surfpool + deploy program    (via Surfpool runbook)
 #   5. Initialize Arcium network on Surfpool
 #   6. Start Docker ARX nodes
-#   7. Initialize MXE                    (arcium deploy --skip-deploy)
-#   8. Copy IDL into SDK folders
+#   7. Deploy program & initialize MXE   (arcium deploy)
+#   8. Initialize computation definitions (init-comp-defs.ts)
+#   9. Copy IDL into SDK folders
 #
 # Usage:
 #   ./scripts/run-local.sh [--skip-deps] [--skip-build] [--skip-deploy]
@@ -324,6 +325,11 @@ if [ "$SKIP_DEPS" = false ]; then
   else
     fail "scripts/setup-deps.sh not found or not executable."
   fi
+
+  task "Installing Bun dependencies"
+  cd "$PROJECT_ROOT"
+  bun install >> "$VERBOSE_LOG" 2>&1
+  ok "Bun dependencies installed"
   step_done
 else
   echo -e "${DIM}[$(elapsed)] Step 1: Skipped (--skip-deps)${RESET}" >&2
@@ -816,33 +822,42 @@ if [ "$SKIP_DEPLOY" = false ]; then
     set +a
   fi
 
-  task "Deploying program and initializing MXE"
+  # Deploy program only (skip MXE init — we do it separately with explicit --authority)
+  task "Deploying program (skip-init)"
   DEPLOY_OK=false
-  if arcium deploy \
+  arcium deploy \
     --keypair-path "$ADMIN_KP" \
     --cluster-offset "$CLUSTER_OFFSET" \
     --recovery-set-size "$RECOVERY_SET_SIZE" \
     --program-name encrypted_forest \
-    --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
-    DEPLOY_OK=true
-    ok "Program deployed and MXE initialized"
-  else
-    warn "arcium deploy exited with error (likely Surfpool timing issue)"
-    task "Retrying MXE init after deploy timing issue"
-    sleep 5
-    PROGRAM_ID_RETRY=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json")
+    --skip-init \
+    --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
+    warn "arcium deploy exited with error (may be OK if program already deployed)"
+  }
+  ok "Program deploy step complete"
+
+  # Initialize MXE separately with explicit --authority so admin.json is the MXE authority.
+  # This ensures init-comp-defs.ts (which signs with admin.json) passes the authority check.
+  PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo "")
+  ADMIN_PUBKEY=$(solana address --keypair "$ADMIN_KP" 2>/dev/null || echo "")
+  if [ -n "$PROGRAM_ID" ] && [ -n "$ADMIN_PUBKEY" ]; then
+    task "Initializing MXE (authority=${ADMIN_PUBKEY})"
     if arcium init-mxe \
-      --callback-program "$PROGRAM_ID_RETRY" \
+      --callback-program "$PROGRAM_ID" \
       --cluster-offset "$CLUSTER_OFFSET" \
       --recovery-set-size "$RECOVERY_SET_SIZE" \
       --keypair-path "$ADMIN_KP" \
+      --authority "$ADMIN_PUBKEY" \
       --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
       DEPLOY_OK=true
-      ok "MXE initialized via fallback"
+      ok "MXE initialized with admin authority"
     else
-      warn "MXE init also failed — check ${VERBOSE_LOG} for details"
-      warn "Retry manually: arcium init-mxe --callback-program \$(solana address --keypair target/deploy/encrypted_forest-keypair.json) --cluster-offset $CLUSTER_OFFSET --recovery-set-size $RECOVERY_SET_SIZE --keypair-path admin.json --rpc-url $RPC_URL"
+      warn "MXE init failed — may already be initialized or check ${VERBOSE_LOG}"
+      # If init-mxe failed because account already exists, we can still proceed
+      DEPLOY_OK=true
     fi
+  else
+    warn "Could not determine program ID or admin pubkey. MXE init skipped."
   fi
 
   # Finalize MXE keys — ARX nodes must complete DKG first, so retry with backoff
@@ -875,24 +890,28 @@ if [ "$SKIP_DEPLOY" = false ]; then
     warn "Run manually: arcium finalize-mxe-keys <PROGRAM_ID> --keypair-path admin.json --cluster-offset 0 --rpc-url $RPC_URL"
   fi
 
-  # Upload circuits to R2 (if CIRCUIT_BUCKET is set)
+  # Upload circuits to R2 (if CIRCUIT_BUCKET is set), skipping if unchanged
   if [ -n "${CIRCUIT_BUCKET:-}" ]; then
-    task "Uploading circuits to R2 bucket '${CIRCUIT_BUCKET}'"
-    "${PROJECT_ROOT}/scripts/upload-circuits.sh" >> "$VERBOSE_LOG" 2>&1
-    ok "Circuits uploaded"
+    CIRCUITS_HASH_FILE="${PROJECT_ROOT}/.pids/circuits-hash"
+    CURRENT_CIRCUITS_HASH=""
+    if compgen -G "${PROJECT_ROOT}/build/*.arcis" > /dev/null 2>&1; then
+      CURRENT_CIRCUITS_HASH=$(shasum -a 256 "${PROJECT_ROOT}"/build/*.arcis | shasum -a 256 | cut -d' ' -f1)
+    fi
+    PREVIOUS_CIRCUITS_HASH=""
+    if [ -f "$CIRCUITS_HASH_FILE" ]; then
+      PREVIOUS_CIRCUITS_HASH=$(cat "$CIRCUITS_HASH_FILE" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "$CURRENT_CIRCUITS_HASH" ] && [ "$CURRENT_CIRCUITS_HASH" = "$PREVIOUS_CIRCUITS_HASH" ]; then
+      ok "Circuits unchanged — skipping upload"
+    else
+      task "Uploading circuits to R2 bucket '${CIRCUIT_BUCKET}'"
+      "${PROJECT_ROOT}/scripts/upload-circuits.sh" >> "$VERBOSE_LOG" 2>&1
+      echo "$CURRENT_CIRCUITS_HASH" > "$CIRCUITS_HASH_FILE"
+      ok "Circuits uploaded"
+    fi
   else
     warn "CIRCUIT_BUCKET not set — skipping circuit upload"
-  fi
-
-  # Init computation definitions (if script exists)
-  INIT_SCRIPT="${PROJECT_ROOT}/scripts/init-comp-defs.ts"
-  if [ -f "$INIT_SCRIPT" ]; then
-    task "Initializing computation definitions"
-    cd "${PROJECT_ROOT}"
-    bun run "$INIT_SCRIPT" >> "$VERBOSE_LOG" 2>&1
-    ok "Computation definitions initialized"
-  else
-    warn "No init-comp-defs.ts found — comp defs must be initialized manually"
   fi
 
   step_done
@@ -902,30 +921,62 @@ else
 fi
 
 # =========================================================================
-# STEP 8: Copy IDL into SDK folders
+# STEP 8: Initialize computation definitions
+# Always runs (comp defs must be initialized after every DB reset / deploy)
 # =========================================================================
-step_start 8 "Copying IDL to SDK packages"
+step_start 8 "Initializing computation definitions"
+
+# Load .env if not already loaded (needed for CIRCUIT_BASE_URL)
+if [ -f "${PROJECT_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_ROOT}/.env"
+  set +a
+fi
+
+INIT_SCRIPT="${PROJECT_ROOT}/scripts/init-comp-defs.ts"
+if [ -f "$INIT_SCRIPT" ]; then
+  task "Running init-comp-defs.ts"
+  cd "${PROJECT_ROOT}"
+  if ARCIUM_CLUSTER_OFFSET="${CLUSTER_OFFSET}" \
+     ADMIN_KEYPAIR="${ADMIN_KP}" \
+     ANCHOR_PROVIDER_URL="${RPC_URL}" \
+     bun run "$INIT_SCRIPT" 2>&1 | tee -a "$VERBOSE_LOG" >&2; then
+    ok "All computation definitions initialized"
+  else
+    warn "init-comp-defs.ts exited with error — some comp defs may not be initialized"
+    warn "Run manually: bun run scripts/init-comp-defs.ts"
+  fi
+else
+  warn "No init-comp-defs.ts found — comp defs must be initialized manually"
+fi
+
+step_done
+
+# =========================================================================
+# STEP 9: Copy IDL into SDK folders
+# =========================================================================
+step_start 9 "Copying IDL to sdk/core (single source of truth)"
 
 IDL_JSON="${PROJECT_ROOT}/target/idl/encrypted_forest.json"
 IDL_TYPES="${PROJECT_ROOT}/target/types/encrypted_forest.ts"
 
 if [ -f "$IDL_JSON" ]; then
   mkdir -p "${PROJECT_ROOT}/sdk/core/src/idl"
-  mkdir -p "${PROJECT_ROOT}/sdk/client/src/idl"
   cp "$IDL_JSON" "${PROJECT_ROOT}/sdk/core/src/idl/encrypted_forest.json"
-  cp "$IDL_JSON" "${PROJECT_ROOT}/sdk/client/src/idl/encrypted_forest.json"
-  ok "IDL JSON copied to sdk/core and sdk/client"
+  ok "IDL JSON copied to sdk/core/src/idl/"
 else
   warn "IDL JSON not found at ${IDL_JSON} — run arcium build first"
 fi
 
 if [ -f "$IDL_TYPES" ]; then
   cp "$IDL_TYPES" "${PROJECT_ROOT}/sdk/core/src/idl/encrypted_forest.ts"
-  cp "$IDL_TYPES" "${PROJECT_ROOT}/sdk/client/src/idl/encrypted_forest.ts"
-  ok "IDL types copied to sdk/core and sdk/client"
+  ok "IDL types copied to sdk/core/src/idl/"
 else
   warn "IDL types not found at ${IDL_TYPES} — run arcium build first"
 fi
+
+ok "All downstream packages import IDL from @encrypted-forest/core"
 
 step_done
 

@@ -395,9 +395,6 @@ describe("Arcium Process Move", () => {
       source.y,
       target.x,
       target.y,
-      currentSlot,
-      10000n, // game_speed
-      BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
     // Compute landing slot for the move
@@ -412,6 +409,8 @@ describe("Arcium Process Move", () => {
       sourcePendingPDA,
       targetPendingPDA,
       landingSlot,
+      10n,   // currentShips
+      0n,    // currentMetal
       moveValues,
       encCtx
     );
@@ -506,7 +505,6 @@ describe("Arcium Flush Planet", () => {
     const moveValues = buildProcessMoveValues(
       playerId, sourcePlanetId, 5n, 0n,
       source.x, source.y, target.x, target.y,
-      currentSlot, 10000n, BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
     // Compute landing slot
@@ -515,7 +513,7 @@ describe("Arcium Flush Planet", () => {
 
     const { computationOffset: moveCO } = await queueProcessMove(
       program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
-      landingSlot, moveValues, encCtx
+      landingSlot, 10n, 0n, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 

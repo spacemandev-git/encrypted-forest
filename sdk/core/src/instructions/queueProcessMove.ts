@@ -7,10 +7,12 @@
  * Planet state (static + dynamic) is read by MPC nodes directly from the
  * source_body account via .account() -- NOT passed as ciphertexts.
  *
- * Encrypted input: Enc<Shared, ProcessMoveInput> = 11 ciphertexts:
+ * Encrypted input: Enc<Shared, ProcessMoveInput> = 8 ciphertexts:
  *   player_id, source_planet_id, ships_to_send, metal_to_send,
- *   source_x, source_y, target_x, target_y,
- *   current_slot, game_speed, last_updated_slot
+ *   source_x, source_y, target_x, target_y
+ *
+ * Plaintext params (computed on-chain from lazy generation):
+ *   current_ships, current_metal, current_slot, game_speed
  *
  * landing_slot is a public parameter validated by the circuit.
  */
@@ -25,7 +27,11 @@ export interface QueueProcessMoveArgs {
   computationOffset: bigint;
   /** Public landing slot (validated by MPC) */
   landingSlot: bigint;
-  /** 11 ciphertexts packed as Vec<u8> (11 * 32 = 352 bytes) */
+  /** Client-computed current ship count (lazy generation from on-chain state) */
+  currentShips: bigint;
+  /** Client-computed current metal count (lazy generation from on-chain state) */
+  currentMetal: bigint;
+  /** 8 ciphertexts packed as Vec<u8> (8 * 32 = 256 bytes) */
   moveCts: Uint8Array;
   /** x25519 pubkey for Enc<Shared, ProcessMoveInput> */
   movePubkey: Uint8Array;
@@ -56,6 +62,8 @@ export function buildQueueProcessMoveIx(
     .queueProcessMove(
       new BN(args.computationOffset.toString()),
       new BN(args.landingSlot.toString()),
+      new BN(args.currentShips.toString()),
+      new BN(args.currentMetal.toString()),
       Buffer.from(args.moveCts),
       Array.from(args.movePubkey) as any,
       new BN(args.moveNonce.toString()),

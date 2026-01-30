@@ -65,9 +65,6 @@ mod circuits {
         pub source_y: u64,
         pub target_x: u64,
         pub target_y: u64,
-        pub current_slot: u64,
-        pub game_speed: u64,
-        pub last_updated_slot: u64,
     }
 
     pub struct FlushTimingInput {
@@ -570,13 +567,21 @@ mod circuits {
     }
 
     /// 3. process_move: Validate and process a ship movement from source planet.
-    /// Input: (PlanetStatic, PlanetDynamic, ProcessMoveInput)
-    /// Output: (PlanetDynamic, PendingMoveData, MoveRevealed) — only dynamic returned
+    /// Input: (PlanetStatic, PlanetDynamic, ProcessMoveInput) + plaintext resource counts
+    /// Output: (PlanetDynamic, PendingMoveData, MoveRevealed)
+    /// Lazy resource generation is done on-chain before queueing; current_ships/current_metal
+    /// and current_slot/game_speed are passed as plaintext params to avoid expensive MPC comparisons.
+    /// State-affecting outputs (dynamic, move_data) remain conditional on validity.
+    /// Revealed outputs are unconditional — the encrypted valid flag lets the client interpret.
     #[instruction]
     pub fn process_move(
         static_input: Enc<Shared, PlanetStatic>,
         dynamic_input: Enc<Shared, PlanetDynamic>,
         move_input: Enc<Shared, ProcessMoveInput>,
+        current_ships: u64,
+        current_metal: u64,
+        current_slot: u64,
+        game_speed: u64,
         observer: Shared,
     ) -> (Enc<Shared, PlanetDynamic>, Enc<Mxe, PendingMoveData>, Enc<Shared, MoveRevealed>) {
         let ps = static_input.to_arcis();
@@ -591,23 +596,6 @@ mod circuits {
             0
         };
 
-        let current_ships = compute_current_resource(
-            pd.ship_count,
-            ps.max_ship_capacity,
-            ps.ship_gen_speed,
-            mv.last_updated_slot,
-            mv.current_slot,
-            mv.game_speed,
-        );
-        let current_metal = compute_current_resource(
-            pd.metal_count,
-            ps.max_metal_capacity,
-            ps.metal_gen_speed,
-            mv.last_updated_slot,
-            mv.current_slot,
-            mv.game_speed,
-        );
-
         let has_ships: u64 = if current_ships >= mv.ships_to_send && mv.ships_to_send > 0 { 1 } else { 0 };
         let has_metal: u64 = if current_metal >= mv.metal_to_send { 1 } else { 0 };
 
@@ -618,9 +606,10 @@ mod circuits {
         let valid = owner_match * has_ships * has_metal * ships_survive;
 
         let landing_slot = compute_landing_slot(
-            mv.current_slot, distance, ps.launch_velocity, mv.game_speed,
+            current_slot, distance, ps.launch_velocity, game_speed,
         );
 
+        // State updates are conditional — invalid moves must not corrupt planet state
         let new_ships = if valid == 1 { current_ships - mv.ships_to_send } else { current_ships };
         let new_metal = if valid == 1 { current_metal - mv.metal_to_send } else { current_metal };
 
@@ -638,9 +627,11 @@ mod circuits {
             attacking_player_id: mv.player_id,
         };
 
+        // Revealed outputs are unconditional — saves 3 encrypted comparisons.
+        // Client checks the encrypted valid flag to interpret results.
         let revealed = MoveRevealed {
-            landing_slot: if valid == 1 { landing_slot } else { 0 },
-            surviving_ships: if valid == 1 { surviving } else { 0 },
+            landing_slot,
+            surviving_ships: surviving,
             valid,
         };
 
@@ -651,8 +642,8 @@ mod circuits {
         )
     }
 
-    /// 4. flush_planet: Process a batch of up to 8 landed moves against planet state.
-    /// Input: (PlanetStatic, PlanetDynamic, 8x PendingMoveData, FlushTimingInput)
+    /// 4. flush_planet: Process a batch of up to 4 landed moves against planet state.
+    /// Input: (PlanetStatic, PlanetDynamic, 4x PendingMoveData, FlushTimingInput)
     /// Output: PlanetDynamic — only dynamic fields change during flush
     #[instruction]
     pub fn flush_planet(
@@ -662,10 +653,6 @@ mod circuits {
         m1: Enc<Mxe, PendingMoveData>,
         m2: Enc<Mxe, PendingMoveData>,
         m3: Enc<Mxe, PendingMoveData>,
-        m4: Enc<Mxe, PendingMoveData>,
-        m5: Enc<Mxe, PendingMoveData>,
-        m6: Enc<Mxe, PendingMoveData>,
-        m7: Enc<Mxe, PendingMoveData>,
         flush_input: Enc<Shared, FlushTimingInput>,
     ) -> Enc<Shared, PlanetDynamic> {
         let ps = static_input.to_arcis();
@@ -698,15 +685,11 @@ mod circuits {
             pd.metal_count
         };
 
-        // Decrypt all 8 move slots (MPC reads from on-chain accounts)
+        // Decrypt all 4 move slots (MPC reads from on-chain accounts)
         let d0 = m0.to_arcis();
         let d1 = m1.to_arcis();
         let d2 = m2.to_arcis();
         let d3 = m3.to_arcis();
-        let d4 = m4.to_arcis();
-        let d5 = m5.to_arcis();
-        let d6 = m6.to_arcis();
-        let d7 = m7.to_arcis();
 
         // Apply combat sequentially for each active move
         let mut ships = gen_ships;
@@ -755,54 +738,6 @@ mod circuits {
             let (s, m, oe, oi) = apply_combat(
                 ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
                 o_exists, o_id, d3.ships_arriving, d3.metal_arriving, d3.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 4
-        if fi.flush_count >= 5 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
-                o_exists, o_id, d4.ships_arriving, d4.metal_arriving, d4.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 5
-        if fi.flush_count >= 6 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
-                o_exists, o_id, d5.ships_arriving, d5.metal_arriving, d5.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 6
-        if fi.flush_count >= 7 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
-                o_exists, o_id, d6.ships_arriving, d6.metal_arriving, d6.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 7
-        if fi.flush_count >= 8 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
-                o_exists, o_id, d7.ships_arriving, d7.metal_arriving, d7.attacking_player_id,
             );
             ships = s;
             metal = m;

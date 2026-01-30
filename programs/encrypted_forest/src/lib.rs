@@ -12,12 +12,12 @@ const COMP_DEF_OFFSET_PROCESS_MOVE: u32 = comp_def_offset("process_move");
 const COMP_DEF_OFFSET_FLUSH_PLANET: u32 = comp_def_offset("flush_planet");
 const COMP_DEF_OFFSET_UPGRADE_PLANET: u32 = comp_def_offset("upgrade_planet");
 
-declare_id!("DjjmgrEJKpEocUCpgjbHCvbz9MTGWK8VBjF63AFN9snW");
+declare_id!("x5fMEUkctVPxkmMC6EyXUNi6cenYatR2EruNDAx2znk");
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MAX_FLUSH_BATCH: usize = 8;
+const MAX_FLUSH_BATCH: usize = 4;
 const PLANET_STATIC_FIELDS: usize = 12;
 const PLANET_DYNAMIC_FIELDS: usize = 4;
 const PENDING_MOVE_DATA_FIELDS: usize = 4;
@@ -28,7 +28,7 @@ const PENDING_MOVE_DATA_FIELDS: usize = 4;
 const PENDING_MOVES_META_BASE_SIZE: usize = 8 + 8 + 32 + 8 + 2 + 1 + 64 + 4;
 // Each PendingMoveEntry: landing_slot(8) + move_id(8)
 const PENDING_MOVE_ENTRY_SIZE: usize = 16;
-// Max queued callbacks (matches MAX_FLUSH_BATCH)
+// Max queued moves per planet (may require multiple flush calls at MAX_FLUSH_BATCH=4)
 const MAX_QUEUED_CALLBACKS: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -299,10 +299,12 @@ pub mod encrypted_forest {
             .plaintext_u64(nt.size_threshold_3 as u64)
             .plaintext_u64(nt.size_threshold_4 as u64)
             .plaintext_u64(nt.size_threshold_5 as u64)
-            // Planet key (same pubkey, separate Shared handle for PlanetDynamic)
+            // Planet key (Shared handle for PlanetDynamic output encryption)
             .x25519_pubkey(pubkey)
-            // Observer
+            .plaintext_u128(0u128)
+            // Observer (Shared handle for revealed output encryption)
             .x25519_pubkey(observer_pubkey)
+            .plaintext_u128(0u128)
             .build();
 
         let body_pda = ctx.accounts.celestial_body.key();
@@ -337,7 +339,10 @@ pub mod encrypted_forest {
             &ctx.accounts.computation_account,
         ) {
             Ok(o) => o,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("init_planet verify_output FAILED: {:?}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, InitPlanetRevealed>)
@@ -438,10 +443,12 @@ pub mod encrypted_forest {
             .plaintext_u64(nt.size_threshold_3 as u64)
             .plaintext_u64(nt.size_threshold_4 as u64)
             .plaintext_u64(nt.size_threshold_5 as u64)
-            // Planet key (same pubkey, separate Shared handle for PlanetDynamic)
+            // Planet key (Shared handle for PlanetDynamic output encryption)
             .x25519_pubkey(pubkey)
-            // Observer
+            .plaintext_u128(0u128)
+            // Observer (Shared handle for revealed output encryption)
             .x25519_pubkey(observer_pubkey)
+            .plaintext_u128(0u128)
             .build();
 
         let player_pda = ctx.accounts.player.key();
@@ -483,7 +490,10 @@ pub mod encrypted_forest {
             &ctx.accounts.computation_account,
         ) {
             Ok(o) => o,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("init_spawn_planet verify_output FAILED: {:?}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, SpawnPlanetRevealed>)
@@ -537,12 +547,14 @@ pub mod encrypted_forest {
         ctx: Context<QueueProcessMove>,
         computation_offset: u64,
         landing_slot: u64,        // public: client-computed, MPC-validated
-        move_cts: Vec<u8>,        // 11 * 32 = 352 bytes
+        current_ships: u64,       // plaintext: client-computed lazy resource generation
+        current_metal: u64,       // plaintext: client-computed lazy resource generation
+        move_cts: Vec<u8>,        // 8 * 32 = 256 bytes
         move_pubkey: [u8; 32],
         move_nonce: u128,
         observer_pubkey: [u8; 32],
     ) -> Result<()> {
-        require!(move_cts.len() == 11 * 32, ErrorCode::InvalidMoveInput);
+        require!(move_cts.len() == 8 * 32, ErrorCode::InvalidMoveInput);
 
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
@@ -587,7 +599,7 @@ pub mod encrypted_forest {
                 ENC_PLANET_DYNAMIC_SIZE,
             );
 
-        // Enc<Shared, ProcessMoveInput> (11 fields)
+        // Enc<Shared, ProcessMoveInput> (8 fields — no slot/speed/last_updated)
         builder = builder
             .x25519_pubkey(move_pubkey)
             .plaintext_u128(move_nonce)
@@ -598,11 +610,17 @@ pub mod encrypted_forest {
             .encrypted_u64(extract_ct(&move_cts, 4))   // source_x
             .encrypted_u64(extract_ct(&move_cts, 5))   // source_y
             .encrypted_u64(extract_ct(&move_cts, 6))   // target_x
-            .encrypted_u64(extract_ct(&move_cts, 7))   // target_y
-            .encrypted_u64(extract_ct(&move_cts, 8))   // current_slot
-            .encrypted_u64(extract_ct(&move_cts, 9))   // game_speed
-            .encrypted_u64(extract_ct(&move_cts, 10))  // last_updated_slot
-            .x25519_pubkey(observer_pubkey);
+            .encrypted_u64(extract_ct(&move_cts, 7));   // target_y
+
+        // Plaintext params: lazy-generation computed client-side
+        builder = builder
+            .plaintext_u64(current_ships)
+            .plaintext_u64(current_metal)
+            .plaintext_u64(clock.slot)
+            .plaintext_u64(game.game_speed)
+            // Observer (Shared handle for revealed output encryption)
+            .x25519_pubkey(observer_pubkey)
+            .plaintext_u128(0u128);
 
         let args = builder.build();
 
@@ -645,7 +663,10 @@ pub mod encrypted_forest {
             &ctx.accounts.computation_account,
         ) {
             Ok(o) => o,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("process_move verify_output FAILED: {:?}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         // Output tuple: (Enc<Shared, PlanetDynamic>, Enc<Mxe, PendingMoveData>, Enc<Shared, MoveRevealed>)
@@ -704,7 +725,7 @@ pub mod encrypted_forest {
     }
 
     // -----------------------------------------------------------------------
-    // Queue flush_planet (batch up to 8 moves)
+    // Queue flush_planet (batch up to 4 moves)
     // Planet state (static + dynamic) read via .account() from celestial_body.
     // Move data read via .account() from PendingMoveAccount PDAs (remaining_accounts).
     // flush_timing_cts = 4 * 32
@@ -775,7 +796,7 @@ pub mod encrypted_forest {
                 ENC_PLANET_DYNAMIC_SIZE,
             );
 
-        // 8 move slots: active ones read from PendingMoveAccount, inactive padded with zeros
+        // 4 move slots: active ones read from PendingMoveAccount, inactive padded with zeros
         for slot_idx in 0..MAX_FLUSH_BATCH {
             if slot_idx < flush_count as usize {
                 // Read Enc<Mxe, PendingMoveData> directly from PendingMoveAccount
@@ -843,7 +864,10 @@ pub mod encrypted_forest {
             &ctx.accounts.computation_account,
         ) {
             Ok(o) => o,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("flush_planet verify_output FAILED: {:?}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         // Output: Enc<Shared, PlanetDynamic> (single value, not tuple)
@@ -964,7 +988,10 @@ pub mod encrypted_forest {
             &ctx.accounts.computation_account,
         ) {
             Ok(o) => o,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("upgrade_planet verify_output FAILED: {:?}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, UpgradeRevealed>)

@@ -1,0 +1,30 @@
+{
+  "name": "@encrypted-forest/solidjs-game",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Encrypted Forest - SolidJS + Canvas TUI game client",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@encrypted-forest/core": "workspace:*",
+    "@encrypted-forest/solidjs-sdk": "workspace:*",
+    "@noble/hashes": "^2.0.1",
+    "@signaldb/core": "^1.7.2",
+    "@signaldb/indexeddb": "^1.1.0",
+    "@signaldb/solid": "^1.0.0",
+    "@solana/web3.js": "^1.98.0",
+    "idb": "^8.0.1",
+    "solid-js": "^1.9.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.0.0",
+    "vite-plugin-solid": "^2.11.0"
+  },
+  "license": "MIT"
+}

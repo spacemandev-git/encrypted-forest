@@ -41,6 +41,7 @@ function convertGame(raw: any): Game {
     whitelist: raw.whitelist,
     serverPubkey: raw.serverPubkey ?? null,
     noiseThresholds: raw.noiseThresholds as NoiseThresholds,
+    hashRounds: raw.hashRounds ?? 100,
   };
 }
 

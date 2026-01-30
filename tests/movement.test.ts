@@ -228,13 +228,11 @@ describe("Queue Process Move", () => {
       1n, 0n,    // playerId, sourcePlanetId
       3n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
-      currentSlot, 10000n,
-      BigInt(sourceBody.lastUpdatedSlot.toString())
     );
 
     const { computationOffset: moveCO } = await queueProcessMove(
       program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
-      landingSlot, moveValues, encCtx
+      landingSlot, 10n, 0n, moveValues, encCtx
     );
 
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
@@ -291,13 +289,11 @@ describe("Queue Process Move", () => {
       1n, 0n,    // playerId, sourcePlanetId
       3n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
-      currentSlot, 10000n,
-      BigInt(bodyBefore.lastUpdatedSlot.toString())
     );
 
     const { computationOffset: moveCO } = await queueProcessMove(
       program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
-      landingSlot, moveValues, encCtx
+      landingSlot, 10n, 0n, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 
@@ -394,11 +390,10 @@ describe("Queue Flush Planet", () => {
       1n, 0n,    // playerId, sourcePlanetId
       5n, 0n,    // shipsToSend, metalToSend
       source.x, source.y, target.x, target.y,
-      slot1, 10000n, BigInt(sourceBody.lastUpdatedSlot.toString())
     );
     const { computationOffset: moveCO } = await queueProcessMove(
       program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
-      landingSlot, moveValues, encCtx
+      landingSlot, 10n, 0n, moveValues, encCtx
     );
     await awaitComputationFinalization(provider, moveCO, program.programId, "confirmed");
 

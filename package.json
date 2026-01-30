@@ -6,7 +6,9 @@
   "workspaces": [
     "sdk/core",
     "sdk/client",
+    "sdk/solidjs-sdk",
     "client",
+    "solidjs-client",
     "tests"
   ],
   "scripts": {

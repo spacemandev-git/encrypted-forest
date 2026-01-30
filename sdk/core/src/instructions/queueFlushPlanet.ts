@@ -1,7 +1,7 @@
 /**
  * Instruction builder: queue_flush_planet
  *
- * Queues an Arcium flush_planet computation to resolve a batch of up to 8
+ * Queues an Arcium flush_planet computation to resolve a batch of up to 4
  * landed moves on a planet. The computation applies combat/reinforcement
  * sequentially and returns updated PlanetDynamic.
  *
@@ -19,7 +19,7 @@ import type { ArciumAccounts } from "./arciumAccounts.js";
 
 export interface QueueFlushPlanetArgs {
   computationOffset: bigint;
-  /** Number of moves to flush (1-8) */
+  /** Number of moves to flush (1-4) */
   flushCount: number;
   /** 4 ciphertexts packed as Vec<u8> (4 * 32 = 128 bytes): FlushTimingInput */
   flushCts: Uint8Array;
