@@ -188,17 +188,17 @@ describe("determineCelestialBody", () => {
       []
     );
 
-    // One comet (byte3 217-242)
+    // One comet (byte3 > 216, <= 242)
     hash[3] = 220;
-    hash[4] = 0; // ShipCapacity
+    hash[4] = 0; // (0 % 6) + 1 = 1 = ShipCapacity
     const oneComet = determineCelestialBody(hash, DEFAULT_THRESHOLDS)!;
     expect(oneComet.comets.length).toBe(1);
     expect(oneComet.comets[0]).toBe(CometBoost.ShipCapacity);
 
-    // Two comets (byte3 >= 243)
+    // Two comets (byte3 > 242)
     hash[3] = 250;
-    hash[4] = 0; // ShipCapacity
-    hash[5] = 3; // MetalGenSpeed
+    hash[4] = 0; // (0 % 6) + 1 = 1 = ShipCapacity
+    hash[5] = 3; // (3 % 6) + 1 = 4 = MetalGenSpeed
     const twoComets = determineCelestialBody(hash, DEFAULT_THRESHOLDS)!;
     expect(twoComets.comets.length).toBe(2);
     expect(twoComets.comets[0]).toBe(CometBoost.ShipCapacity);
@@ -211,8 +211,8 @@ describe("determineCelestialBody", () => {
     hash[1] = 50;
     hash[2] = 20;
     hash[3] = 250; // two comets
-    hash[4] = 0; // ShipCapacity (0 % 6 = 0)
-    hash[5] = 6; // would be ShipCapacity (6 % 6 = 0), should be deduplicated to (7%6=1) MetalCapacity
+    hash[4] = 0; // (0 % 6) + 1 = 1 = ShipCapacity
+    hash[5] = 6; // (6 % 6) + 1 = 1 = ShipCapacity, dedup: ((6+1) % 6) + 1 = 2 = MetalCapacity
     const result = determineCelestialBody(hash, DEFAULT_THRESHOLDS)!;
     expect(result.comets.length).toBe(2);
     expect(result.comets[0]).toBe(CometBoost.ShipCapacity);
@@ -337,20 +337,22 @@ describe("upgradeCost", () => {
 
 describe("computeCurrentShips", () => {
   it("should generate ships over time", () => {
-    // genSpeed=2, elapsed=50, gameSpeed=10 -> generated = 2*50/10 = 10
-    expect(computeCurrentShips(100n, 1000n, 2n, 0n, 50n, 10n)).toBe(110n);
+    // genSpeed=2, elapsed=50, gameSpeed=10000 -> generated = 2*50*10000/10000 = 100
+    expect(computeCurrentShips(100n, 1000n, 2n, 0n, 50n, 10000n)).toBe(200n);
   });
 
   it("should cap at max capacity", () => {
-    expect(computeCurrentShips(990n, 1000n, 100n, 0n, 100n, 10n)).toBe(1000n);
+    // genSpeed=100, elapsed=100, gameSpeed=10000 -> generated = 100*100*10000/10000 = 10000
+    // 990 + 10000 = capped at 1000
+    expect(computeCurrentShips(990n, 1000n, 100n, 0n, 100n, 10000n)).toBe(1000n);
   });
 
   it("should not generate with 0 speed", () => {
-    expect(computeCurrentShips(100n, 1000n, 0n, 0n, 100n, 10n)).toBe(100n);
+    expect(computeCurrentShips(100n, 1000n, 0n, 0n, 100n, 10000n)).toBe(100n);
   });
 
   it("should not generate if slot has not advanced", () => {
-    expect(computeCurrentShips(100n, 1000n, 5n, 50n, 50n, 10n)).toBe(100n);
+    expect(computeCurrentShips(100n, 1000n, 5n, 50n, 50n, 10000n)).toBe(100n);
   });
 });
 

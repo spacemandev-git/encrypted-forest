@@ -91,9 +91,9 @@ describe("Movement Helper Functions", () => {
 
   it("computes landing slot correctly", () => {
     // current=100, distance=10, velocity=5, speed=10000
-    // travel_time = 10 * 10000 / 5 = 20000
-    // landing = 100 + 20000 = 20100
-    expect(computeLandingSlot(100n, 10n, 5n, 10000n)).toBe(20100n);
+    // travel_time = 10 * 10000 / (5 * 10000) = 2
+    // landing = 100 + 2 = 102
+    expect(computeLandingSlot(100n, 10n, 5n, 10000n)).toBe(102n);
 
     // Zero velocity = max
     expect(computeLandingSlot(100n, 10n, 0n, 10000n)).toBe(
@@ -142,17 +142,18 @@ describe("Movement Helper Functions", () => {
     const lastSlot = 1000n;
     const gameSpeed = 10000n;
 
-    // 1000 slots elapsed: generated = 2 * 1000 / 10000 = 0
+    // 1000 slots elapsed: generated = 2 * 1000 * 10000 / 10000 = 2000
+    // total = 10 + 2000 = 2010, capped at 100
     const currentSlot1 = 2000n;
     const elapsed1 = currentSlot1 - lastSlot;
-    const generated1 = (genSpeed * elapsed1) / gameSpeed;
+    const generated1 = (genSpeed * elapsed1 * 10000n) / gameSpeed;
     const result1 = (lastCount + generated1) > maxCap ? maxCap : (lastCount + generated1);
-    expect(result1).toBe(10n);
+    expect(result1).toBe(100n);
 
-    // 50000 slots elapsed: generated = 2 * 50000 / 10000 = 10
-    const currentSlot2 = 51000n;
+    // 5 slots elapsed: generated = 2 * 5 * 10000 / 10000 = 10
+    const currentSlot2 = 1005n;
     const elapsed2 = currentSlot2 - lastSlot;
-    const generated2 = (genSpeed * elapsed2) / gameSpeed;
+    const generated2 = (genSpeed * elapsed2 * 10000n) / gameSpeed;
     const result2 = (lastCount + generated2) > maxCap ? maxCap : (lastCount + generated2);
     expect(result2).toBe(20n);
   });
@@ -222,7 +223,7 @@ describe("Queue Process Move", () => {
     // Compute landing slot for the move
     const distance = computeDistance(source.x, source.y, target.x, target.y);
     const launchVelocity = BigInt(sourceBody.launchVelocity?.toString() || "2");
-    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 10000n);
+    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 1000n);
 
     const moveValues = buildProcessMoveValues(
       1n, 0n,    // playerId, sourcePlanetId
@@ -283,7 +284,7 @@ describe("Queue Process Move", () => {
     // Compute landing slot
     const distance = computeDistance(source.x, source.y, target.x, target.y);
     const launchVelocity = BigInt(bodyBefore.launchVelocity?.toString() || "2");
-    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 10000n);
+    const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, 1000n);
 
     const moveValues = buildProcessMoveValues(
       1n, 0n,    // playerId, sourcePlanetId
@@ -384,7 +385,7 @@ describe("Queue Flush Planet", () => {
     // Compute landing slot
     const distance = computeDistance(source.x, source.y, target.x, target.y);
     const launchVelocity = BigInt(sourceBody.launchVelocity?.toString() || "2");
-    const landingSlot = computeLandingSlot(slot1, distance, launchVelocity, 10000n);
+    const landingSlot = computeLandingSlot(slot1, distance, launchVelocity, 1000n);
 
     const moveValues = buildProcessMoveValues(
       1n, 0n,    // playerId, sourcePlanetId
@@ -409,7 +410,7 @@ describe("Queue Flush Planet", () => {
     const targetBody = await program.account.encryptedCelestialBody.fetch(targetPlanetPDA);
     const slot2 = BigInt(await provider.connection.getSlot("confirmed"));
     const flushValues = buildFlushPlanetValues(
-      slot2, 10000n,
+      slot2, 1000n,
       BigInt(targetBody.lastUpdatedSlot.toString()),
       1n
     );

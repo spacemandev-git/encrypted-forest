@@ -34,3 +34,4 @@ sdk/client/src/idl/
 # Wrangler
 .wrangler
 artifacts/
+keypairs/*

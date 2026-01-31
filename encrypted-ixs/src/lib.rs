@@ -5,34 +5,31 @@ mod circuits {
     use arcis::*;
 
     // =========================================================================
-    // Shared structs — split into Static (12 fields) + Dynamic (4 fields)
+    // Packed types — use Pack<T> directly (not wrapped in struct)
     // =========================================================================
 
-    /// Static planet properties: set at init, only modified by upgrade.
-    /// 12 fields => SharedEncryptedStruct<12>.
-    pub struct PlanetStatic {
-        pub body_type: u64,
-        pub size: u64,
-        pub max_ship_capacity: u64,
-        pub ship_gen_speed: u64,
-        pub max_metal_capacity: u64,
-        pub metal_gen_speed: u64,
-        pub range: u64,
-        pub launch_velocity: u64,
-        pub level: u64,
-        pub comet_count: u64,
-        pub comet_0: u64,
-        pub comet_1: u64,
-    }
+    // Type aliases for readability
+    type PlanetStatic = Pack<[u64; 11]>;
+    type PlanetDynamic = Pack<[u64; 4]>;
 
-    /// Dynamic planet properties: modified by flush/process_move/upgrade.
-    /// 4 fields => SharedEncryptedStruct<4>.
-    pub struct PlanetDynamic {
-        pub ship_count: u64,
-        pub metal_count: u64,
-        pub owner_exists: u64,
-        pub owner_id: u64,
-    }
+    // PlanetStatic field indices (into [u64; 11])
+    const PS_BODY_TYPE: usize = 0;
+    const PS_SIZE: usize = 1;
+    const PS_MAX_SHIP_CAP: usize = 2;
+    const PS_SHIP_GEN: usize = 3;
+    const PS_MAX_METAL_CAP: usize = 4;
+    const PS_METAL_GEN: usize = 5;
+    const PS_RANGE: usize = 6;
+    const PS_VELOCITY: usize = 7;
+    const PS_LEVEL: usize = 8;
+    const PS_COMET_0: usize = 9;
+    const PS_COMET_1: usize = 10;
+
+    // PlanetDynamic field indices (into [u64; 4])
+    const PD_SHIPS: usize = 0;
+    const PD_METAL: usize = 1;
+    const PD_OWNER_EXISTS: usize = 2;
+    const PD_OWNER_ID: usize = 3;
 
     // =========================================================================
     // Input structs
@@ -188,25 +185,16 @@ mod circuits {
         }
     }
 
-    /// Determine comets from hash byte3.
-    fn determine_comet_count(byte3: u64) -> u64 {
-        if byte3 <= 216 {
-            0
-        } else if byte3 <= 242 {
-            1
-        } else {
-            2
-        }
-    }
-
+    /// Comet value from byte. Returns 1-6 (never 0; 0 means "no comet").
     fn comet_from_byte(b: u64) -> u64 {
-        b % 6
+        (b % 6) + 1
     }
 
+    /// Comet value from byte, avoiding a duplicate of `first`.
     fn comet_from_byte_avoiding(b: u64, first: u64) -> u64 {
-        let c = b % 6;
+        let c = (b % 6) + 1;
         if c == first {
-            (b + 1) % 6
+            ((b + 1) % 6) + 1
         } else {
             c
         }
@@ -230,10 +218,11 @@ mod circuits {
         }
     }
 
-    /// Apply comet boosts to stats. No early return - use if/else for active check.
+    /// Apply comet boosts to stats. comet_val 0 = inactive (no boost).
+    /// comet_val 1=ShipCapacity, 2=MetalCapacity, 3=ShipGenSpeed,
+    /// 4=MetalGenSpeed, 5=Range, 6=LaunchVelocity.
     fn apply_one_comet(
         comet_val: u64,
-        active: u64,
         ship_cap: u64,
         ship_gen: u64,
         metal_cap: u64,
@@ -241,15 +230,15 @@ mod circuits {
         range: u64,
         velocity: u64,
     ) -> (u64, u64, u64, u64, u64, u64) {
-        if active == 0 {
+        if comet_val == 0 {
             (ship_cap, ship_gen, metal_cap, metal_gen, range, velocity)
         } else {
-            let new_ship_cap = if comet_val == 0 { ship_cap * 2 } else { ship_cap };
-            let new_metal_cap = if comet_val == 1 { metal_cap * 2 } else { metal_cap };
-            let new_ship_gen = if comet_val == 2 { ship_gen * 2 } else { ship_gen };
-            let new_metal_gen = if comet_val == 3 { metal_gen * 2 } else { metal_gen };
-            let new_range = if comet_val == 4 { range * 2 } else { range };
-            let new_velocity = if comet_val == 5 { velocity * 2 } else { velocity };
+            let new_ship_cap = if comet_val == 1 { ship_cap * 2 } else { ship_cap };
+            let new_metal_cap = if comet_val == 2 { metal_cap * 2 } else { metal_cap };
+            let new_ship_gen = if comet_val == 3 { ship_gen * 2 } else { ship_gen };
+            let new_metal_gen = if comet_val == 4 { metal_gen * 2 } else { metal_gen };
+            let new_range = if comet_val == 5 { range * 2 } else { range };
+            let new_velocity = if comet_val == 6 { velocity * 2 } else { velocity };
             (new_ship_cap, new_ship_gen, new_metal_cap, new_metal_gen, new_range, new_velocity)
         }
     }
@@ -271,7 +260,7 @@ mod circuits {
             last_count
         } else {
             let elapsed = current_slot - last_updated_slot;
-            let generated = gen_speed * elapsed / game_speed;
+            let generated = gen_speed * elapsed * 10000 / game_speed;
             let total = last_count + generated;
             if total > max_capacity {
                 max_capacity
@@ -307,12 +296,13 @@ mod circuits {
         }
     }
 
-    /// Compute landing slot. No early return.
+    /// Compute landing slot. game_speed=10000 is 1x; lower = faster.
+    /// Formula: current_slot + distance * game_speed / (velocity * 10000)
     fn compute_landing_slot(current_slot: u64, distance: u64, velocity: u64, game_speed: u64) -> u64 {
         if velocity == 0 {
             current_slot + 999999999
         } else {
-            let travel_time = distance * game_speed / velocity;
+            let travel_time = distance * game_speed / (velocity * 10000);
             current_slot + travel_time
         }
     }
@@ -345,10 +335,10 @@ mod circuits {
     }
 
     /// Build PlanetStatic + PlanetDynamic from noise-derived properties.
+    /// comet_0/comet_1: 0=none, 1-6=boost type (inferred from value != 0).
     fn build_planet_state(
         body_type: u64,
         size: u64,
-        comet_count: u64,
         comet_0: u64,
         comet_1: u64,
         owner_exists: u64,
@@ -357,37 +347,17 @@ mod circuits {
         let (ship_cap, ship_gen, metal_cap, metal_gen, range, velocity, native_ships) =
             base_stats(body_type, size);
 
-        let c0_active: u64 = if comet_count >= 1 { 1 } else { 0 };
         let (sc1, sg1, mc1, mg1, r1, v1) =
-            apply_one_comet(comet_0, c0_active, ship_cap, ship_gen, metal_cap, metal_gen, range, velocity);
+            apply_one_comet(comet_0, ship_cap, ship_gen, metal_cap, metal_gen, range, velocity);
 
-        let c1_active: u64 = if comet_count >= 2 { 1 } else { 0 };
         let (sc2, sg2, mc2, mg2, r2, v2) =
-            apply_one_comet(comet_1, c1_active, sc1, sg1, mc1, mg1, r1, v1);
+            apply_one_comet(comet_1, sc1, sg1, mc1, mg1, r1, v1);
 
         let ship_count = if owner_exists == 1 { 0u64 } else { native_ships };
 
-        let ps = PlanetStatic {
-            body_type,
-            size,
-            max_ship_capacity: sc2,
-            ship_gen_speed: sg2,
-            max_metal_capacity: mc2,
-            metal_gen_speed: mg2,
-            range: r2,
-            launch_velocity: v2,
-            level: 1,
-            comet_count,
-            comet_0,
-            comet_1,
-        };
+        let ps: PlanetStatic = Pack::new([body_type, size, sc2, sg2, mc2, mg2, r2, v2, 1, comet_0, comet_1]);
 
-        let pd = PlanetDynamic {
-            ship_count,
-            metal_count: 0,
-            owner_exists,
-            owner_id,
-        };
+        let pd: PlanetDynamic = Pack::new([ship_count, 0u64, owner_exists, owner_id]);
 
         (ps, pd)
     }
@@ -471,14 +441,14 @@ mod circuits {
             size_threshold_3, size_threshold_4, size_threshold_5,
         );
 
-        let comet_count = determine_comet_count(byte3);
-        let comet_0 = comet_from_byte(byte4);
-        let comet_1_raw = comet_from_byte_avoiding(byte5, comet_0);
-        let comet_1 = if comet_count >= 2 { comet_1_raw } else { 255u64 };
-        let comet_0_final = if comet_count >= 1 { comet_0 } else { 255u64 };
+        // Comet determination: byte3 thresholds, values 1-6 (0 = none)
+        let comet_0_raw = comet_from_byte(byte4);
+        let comet_1_raw = comet_from_byte_avoiding(byte5, comet_0_raw);
+        let comet_0 = if byte3 > 216 { comet_0_raw } else { 0u64 };
+        let comet_1 = if byte3 > 242 { comet_1_raw } else { 0u64 };
 
         let (ps, pd) = build_planet_state(
-            body_type, size, comet_count, comet_0_final, comet_1,
+            body_type, size, comet_0, comet_1,
             0, 0,
         );
 
@@ -535,11 +505,11 @@ mod circuits {
             size_threshold_3, size_threshold_4, size_threshold_5,
         );
 
-        let comet_count = determine_comet_count(byte3);
-        let comet_0 = comet_from_byte(byte4);
-        let comet_1_raw = comet_from_byte_avoiding(byte5, comet_0);
-        let comet_1 = if comet_count >= 2 { comet_1_raw } else { 255u64 };
-        let comet_0_final = if comet_count >= 1 { comet_0 } else { 255u64 };
+        // Comet determination: byte3 thresholds, values 1-6 (0 = none)
+        let comet_0_raw = comet_from_byte(byte4);
+        let comet_1_raw = comet_from_byte_avoiding(byte5, comet_0_raw);
+        let comet_0 = if byte3 > 216 { comet_0_raw } else { 0u64 };
+        let comet_1 = if byte3 > 242 { comet_1_raw } else { 0u64 };
 
         let is_planet: u64 = if body_type == 0 { 1 } else { 0 };
         let is_miniscule: u64 = if size == 1 { 1 } else { 0 };
@@ -549,7 +519,7 @@ mod circuits {
         let oid = if is_spawn_valid == 1 { inp.player_id } else { 0u64 };
 
         let (ps, pd) = build_planet_state(
-            body_type, size, comet_count, comet_0_final, comet_1,
+            body_type, size, comet_0, comet_1,
             owner_exists, oid,
         );
 
@@ -569,10 +539,6 @@ mod circuits {
     /// 3. process_move: Validate and process a ship movement from source planet.
     /// Input: (PlanetStatic, PlanetDynamic, ProcessMoveInput) + plaintext resource counts
     /// Output: (PlanetDynamic, PendingMoveData, MoveRevealed)
-    /// Lazy resource generation is done on-chain before queueing; current_ships/current_metal
-    /// and current_slot/game_speed are passed as plaintext params to avoid expensive MPC comparisons.
-    /// State-affecting outputs (dynamic, move_data) remain conditional on validity.
-    /// Revealed outputs are unconditional — the encrypted valid flag lets the client interpret.
     #[instruction]
     pub fn process_move(
         static_input: Enc<Shared, PlanetStatic>,
@@ -584,12 +550,12 @@ mod circuits {
         game_speed: u64,
         observer: Shared,
     ) -> (Enc<Shared, PlanetDynamic>, Enc<Mxe, PendingMoveData>, Enc<Shared, MoveRevealed>) {
-        let ps = static_input.to_arcis();
-        let pd = dynamic_input.to_arcis();
+        let ps_data: [u64; 11] = static_input.to_arcis().unpack();
+        let pd_data: [u64; 4] = dynamic_input.to_arcis().unpack();
         let mv = move_input.to_arcis();
 
-        let owner_match: u64 = if pd.owner_exists == 1
-            && pd.owner_id == mv.player_id
+        let owner_match: u64 = if pd_data[PD_OWNER_EXISTS] == 1
+            && pd_data[PD_OWNER_ID] == mv.player_id
         {
             1
         } else {
@@ -600,25 +566,19 @@ mod circuits {
         let has_metal: u64 = if current_metal >= mv.metal_to_send { 1 } else { 0 };
 
         let distance = compute_distance(mv.source_x, mv.source_y, mv.target_x, mv.target_y);
-        let surviving = apply_distance_decay(mv.ships_to_send, distance, ps.range);
+        let surviving = apply_distance_decay(mv.ships_to_send, distance, ps_data[PS_RANGE]);
         let ships_survive: u64 = if surviving > 0 { 1 } else { 0 };
 
         let valid = owner_match * has_ships * has_metal * ships_survive;
 
         let landing_slot = compute_landing_slot(
-            current_slot, distance, ps.launch_velocity, game_speed,
+            current_slot, distance, ps_data[PS_VELOCITY], game_speed,
         );
 
-        // State updates are conditional — invalid moves must not corrupt planet state
         let new_ships = if valid == 1 { current_ships - mv.ships_to_send } else { current_ships };
         let new_metal = if valid == 1 { current_metal - mv.metal_to_send } else { current_metal };
 
-        let updated_dynamic = PlanetDynamic {
-            ship_count: new_ships,
-            metal_count: new_metal,
-            owner_exists: pd.owner_exists,
-            owner_id: pd.owner_id,
-        };
+        let updated_dynamic: PlanetDynamic = Pack::new([new_ships, new_metal, pd_data[PD_OWNER_EXISTS], pd_data[PD_OWNER_ID]]);
 
         let move_data = PendingMoveData {
             ships_arriving: if valid == 1 { surviving } else { 0 },
@@ -627,8 +587,6 @@ mod circuits {
             attacking_player_id: mv.player_id,
         };
 
-        // Revealed outputs are unconditional — saves 3 encrypted comparisons.
-        // Client checks the encrypted valid flag to interpret results.
         let revealed = MoveRevealed {
             landing_slot,
             surviving_ships: surviving,
@@ -644,7 +602,7 @@ mod circuits {
 
     /// 4. flush_planet: Process a batch of up to 4 landed moves against planet state.
     /// Input: (PlanetStatic, PlanetDynamic, 4x PendingMoveData, FlushTimingInput)
-    /// Output: PlanetDynamic — only dynamic fields change during flush
+    /// Output: PlanetDynamic -- only dynamic fields change during flush
     #[instruction]
     pub fn flush_planet(
         static_input: Enc<Shared, PlanetStatic>,
@@ -655,34 +613,34 @@ mod circuits {
         m3: Enc<Mxe, PendingMoveData>,
         flush_input: Enc<Shared, FlushTimingInput>,
     ) -> Enc<Shared, PlanetDynamic> {
-        let ps = static_input.to_arcis();
-        let pd = dynamic_input.to_arcis();
+        let ps_data: [u64; 11] = static_input.to_arcis().unpack();
+        let pd_data: [u64; 4] = dynamic_input.to_arcis().unpack();
         let fi = flush_input.to_arcis();
 
         // Compute current resources via lazy generation
-        let gen_ships = if pd.owner_exists == 1 {
+        let gen_ships = if pd_data[PD_OWNER_EXISTS] == 1 {
             compute_current_resource(
-                pd.ship_count,
-                ps.max_ship_capacity,
-                ps.ship_gen_speed,
+                pd_data[PD_SHIPS],
+                ps_data[PS_MAX_SHIP_CAP],
+                ps_data[PS_SHIP_GEN],
                 fi.last_updated_slot,
                 fi.current_slot,
                 fi.game_speed,
             )
         } else {
-            pd.ship_count
+            pd_data[PD_SHIPS]
         };
-        let gen_metal = if pd.owner_exists == 1 {
+        let gen_metal = if pd_data[PD_OWNER_EXISTS] == 1 {
             compute_current_resource(
-                pd.metal_count,
-                ps.max_metal_capacity,
-                ps.metal_gen_speed,
+                pd_data[PD_METAL],
+                ps_data[PS_MAX_METAL_CAP],
+                ps_data[PS_METAL_GEN],
                 fi.last_updated_slot,
                 fi.current_slot,
                 fi.game_speed,
             )
         } else {
-            pd.metal_count
+            pd_data[PD_METAL]
         };
 
         // Decrypt all 4 move slots (MPC reads from on-chain accounts)
@@ -694,13 +652,13 @@ mod circuits {
         // Apply combat sequentially for each active move
         let mut ships = gen_ships;
         let mut metal = gen_metal;
-        let mut o_exists = pd.owner_exists;
-        let mut o_id = pd.owner_id;
+        let mut o_exists = pd_data[PD_OWNER_EXISTS];
+        let mut o_id = pd_data[PD_OWNER_ID];
 
         // Move 0
         if fi.flush_count >= 1 {
             let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
+                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
                 o_exists, o_id, d0.ships_arriving, d0.metal_arriving, d0.attacking_player_id,
             );
             ships = s;
@@ -712,7 +670,7 @@ mod circuits {
         // Move 1
         if fi.flush_count >= 2 {
             let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
+                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
                 o_exists, o_id, d1.ships_arriving, d1.metal_arriving, d1.attacking_player_id,
             );
             ships = s;
@@ -724,7 +682,7 @@ mod circuits {
         // Move 2
         if fi.flush_count >= 3 {
             let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
+                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
                 o_exists, o_id, d2.ships_arriving, d2.metal_arriving, d2.attacking_player_id,
             );
             ships = s;
@@ -736,7 +694,7 @@ mod circuits {
         // Move 3
         if fi.flush_count >= 4 {
             let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps.max_ship_capacity, ps.max_metal_capacity,
+                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
                 o_exists, o_id, d3.ships_arriving, d3.metal_arriving, d3.attacking_player_id,
             );
             ships = s;
@@ -745,12 +703,7 @@ mod circuits {
             o_id = oi;
         }
 
-        let updated = PlanetDynamic {
-            ship_count: ships,
-            metal_count: metal,
-            owner_exists: o_exists,
-            owner_id: o_id,
-        };
+        let updated: PlanetDynamic = Pack::new([ships, metal, o_exists, o_id]);
 
         dynamic_input.owner.from_arcis(updated)
     }
@@ -764,80 +717,74 @@ mod circuits {
         dynamic_input: Enc<Shared, PlanetDynamic>,
         upgrade_input: Enc<Shared, UpgradePlanetInput>,
     ) -> (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, UpgradeRevealed>) {
-        let ps = static_input.to_arcis();
-        let pd = dynamic_input.to_arcis();
+        let ps_data: [u64; 11] = static_input.to_arcis().unpack();
+        let pd_data: [u64; 4] = dynamic_input.to_arcis().unpack();
         let ui = upgrade_input.to_arcis();
 
-        let owner_match: u64 = if pd.owner_exists == 1
-            && pd.owner_id == ui.player_id
+        let owner_match: u64 = if pd_data[PD_OWNER_EXISTS] == 1
+            && pd_data[PD_OWNER_ID] == ui.player_id
         {
             1
         } else {
             0
         };
 
-        let is_planet: u64 = if ps.body_type == 0 { 1 } else { 0 };
+        let is_planet: u64 = if ps_data[PS_BODY_TYPE] == 0 { 1 } else { 0 };
 
         let current_metal = compute_current_resource(
-            pd.metal_count,
-            ps.max_metal_capacity,
-            ps.metal_gen_speed,
+            pd_data[PD_METAL],
+            ps_data[PS_MAX_METAL_CAP],
+            ps_data[PS_METAL_GEN],
             ui.last_updated_slot,
             ui.current_slot,
             ui.game_speed,
         );
         let current_ships = compute_current_resource(
-            pd.ship_count,
-            ps.max_ship_capacity,
-            ps.ship_gen_speed,
+            pd_data[PD_SHIPS],
+            ps_data[PS_MAX_SHIP_CAP],
+            ps_data[PS_SHIP_GEN],
             ui.last_updated_slot,
             ui.current_slot,
             ui.game_speed,
         );
 
-        let cost = upgrade_cost(ps.level);
+        let cost = upgrade_cost(ps_data[PS_LEVEL]);
         let can_afford: u64 = if current_metal >= cost { 1 } else { 0 };
 
         let valid = owner_match * is_planet * can_afford;
 
-        let new_level = if valid == 1 { ps.level + 1 } else { ps.level };
+        let new_level = if valid == 1 { ps_data[PS_LEVEL] + 1 } else { ps_data[PS_LEVEL] };
         let new_metal = if valid == 1 { current_metal - cost } else { current_metal };
-        let new_ship_cap = if valid == 1 { ps.max_ship_capacity * 2 } else { ps.max_ship_capacity };
-        let new_metal_cap = if valid == 1 { ps.max_metal_capacity * 2 } else { ps.max_metal_capacity };
-        let new_ship_gen = if valid == 1 { ps.ship_gen_speed * 2 } else { ps.ship_gen_speed };
+        let new_ship_cap = if valid == 1 { ps_data[PS_MAX_SHIP_CAP] * 2 } else { ps_data[PS_MAX_SHIP_CAP] };
+        let new_metal_cap = if valid == 1 { ps_data[PS_MAX_METAL_CAP] * 2 } else { ps_data[PS_MAX_METAL_CAP] };
+        let new_ship_gen = if valid == 1 { ps_data[PS_SHIP_GEN] * 2 } else { ps_data[PS_SHIP_GEN] };
 
         let new_range = if valid == 1 && ui.focus == 0 {
-            ps.range * 2
+            ps_data[PS_RANGE] * 2
         } else {
-            ps.range
+            ps_data[PS_RANGE]
         };
         let new_velocity = if valid == 1 && ui.focus == 1 {
-            ps.launch_velocity * 2
+            ps_data[PS_VELOCITY] * 2
         } else {
-            ps.launch_velocity
+            ps_data[PS_VELOCITY]
         };
 
-        let updated_static = PlanetStatic {
-            body_type: ps.body_type,
-            size: ps.size,
-            max_ship_capacity: new_ship_cap,
-            ship_gen_speed: new_ship_gen,
-            max_metal_capacity: new_metal_cap,
-            metal_gen_speed: ps.metal_gen_speed,
-            range: new_range,
-            launch_velocity: new_velocity,
-            level: new_level,
-            comet_count: ps.comet_count,
-            comet_0: ps.comet_0,
-            comet_1: ps.comet_1,
-        };
+        let updated_static: PlanetStatic = Pack::new([
+                ps_data[PS_BODY_TYPE],
+                ps_data[PS_SIZE],
+                new_ship_cap,
+                new_ship_gen,
+                new_metal_cap,
+                ps_data[PS_METAL_GEN],
+                new_range,
+                new_velocity,
+                new_level,
+                ps_data[PS_COMET_0],
+                ps_data[PS_COMET_1],
+            ]);
 
-        let updated_dynamic = PlanetDynamic {
-            ship_count: current_ships,
-            metal_count: new_metal,
-            owner_exists: pd.owner_exists,
-            owner_id: pd.owner_id,
-        };
+        let updated_dynamic: PlanetDynamic = Pack::new([current_ships, new_metal, pd_data[PD_OWNER_EXISTS], pd_data[PD_OWNER_ID]]);
 
         let revealed = UpgradeRevealed {
             success: valid,

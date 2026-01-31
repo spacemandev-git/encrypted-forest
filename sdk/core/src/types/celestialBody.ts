@@ -18,12 +18,12 @@ export enum CelestialBodyType {
  * Comet boost stat. Matches on-chain `CometBoost` enum.
  */
 export enum CometBoost {
-  ShipCapacity = 0,
-  MetalCapacity = 1,
-  ShipGenSpeed = 2,
-  MetalGenSpeed = 3,
-  Range = 4,
-  LaunchVelocity = 5,
+  ShipCapacity = 1,
+  MetalCapacity = 2,
+  ShipGenSpeed = 3,
+  MetalGenSpeed = 4,
+  Range = 5,
+  LaunchVelocity = 6,
 }
 
 /**
@@ -91,10 +91,11 @@ export interface CelestialBodyStats {
  * Matches the Rust `EncryptedCelestialBody` struct.
  *
  * Has TWO separate encryption sections:
- *   Static  (12 fields): body_type, size, max_ship_capacity, ship_gen_speed,
- *           max_metal_capacity, metal_gen_speed, range, launch_velocity,
- *           level, comet_count, comet_0, comet_1
- *   Dynamic (4 fields):  ship_count, metal_count, owner_exists, owner_id
+ *   Static  (4 packed FEs): Pack<[u64;11]> containing body_type, size,
+ *           max_ship_capacity, ship_gen_speed, max_metal_capacity,
+ *           metal_gen_speed, range, launch_velocity, level, comet_0, comet_1
+ *   Dynamic (2 packed FEs): Pack<[u64;4]> containing ship_count, metal_count,
+ *           owner_exists, owner_id
  *
  * PDA: ["planet", game_id.to_le_bytes(), planet_hash]
  */
@@ -102,18 +103,18 @@ export interface EncryptedCelestialBodyAccount {
   planetHash: Uint8Array; // [u8; 32]
   lastUpdatedSlot: bigint;
   lastFlushedSlot: bigint;
-  // Static encryption section (12 ciphertexts)
+  // Static encryption section (4 packed FE ciphertexts)
   staticEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
   staticEncNonce: Uint8Array; // [u8; 16]
-  staticEncCiphertexts: Uint8Array[]; // 12 x [u8; 32]
-  // Dynamic encryption section (4 ciphertexts)
+  staticEncCiphertexts: Uint8Array[]; // 4 x [u8; 32]
+  // Dynamic encryption section (2 packed FE ciphertexts)
   dynamicEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
   dynamicEncNonce: Uint8Array; // [u8; 16]
-  dynamicEncCiphertexts: Uint8Array[]; // 4 x [u8; 32]
+  dynamicEncCiphertexts: Uint8Array[]; // 2 x [u8; 32]
 }
 
-/** Number of static encrypted fields (PlanetStatic). */
-export const PLANET_STATIC_FIELDS = 12;
+/** Number of static encrypted field elements (Pack<[u64;11]> = 4 FEs). */
+export const PLANET_STATIC_FIELDS = 4;
 
-/** Number of dynamic encrypted fields (PlanetDynamic). */
-export const PLANET_DYNAMIC_FIELDS = 4;
+/** Number of dynamic encrypted field elements (Pack<[u64;4]> = 2 FEs). */
+export const PLANET_DYNAMIC_FIELDS = 2;

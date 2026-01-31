@@ -18,6 +18,7 @@ import { Program, AnchorProvider, Wallet } from "@coral-xyz/anchor";
 import {
   Connection,
   Keypair,
+  PublicKey,
   SystemProgram,
 } from "@solana/web3.js";
 import { readFileSync } from "fs";
@@ -26,6 +27,7 @@ import {
   getCompDefAccAddress,
   getCompDefAccOffset,
   getArciumProgramId,
+  getLookupTableAddress,
 } from "@arcium-hq/client";
 
 import idlJson from "../target/idl/encrypted_forest.json";
@@ -47,6 +49,8 @@ async function main() {
   const program = new Program(idlJson as any, provider);
   const mxeAccount = getMXEAccAddress(program.programId);
   const arciumProgram = getArciumProgramId();
+  const addressLookupTable = getLookupTableAddress(program.programId);
+  const lutProgram = new PublicKey("AddressLookupTab1e1111111111111111111111111");
 
   const compDefNames = [
     "init_planet",
@@ -81,8 +85,10 @@ async function main() {
           payer: admin.publicKey,
           mxeAccount,
           compDefAccount: compDefAddress,
-          arciumProgram,
+          addressLookupTable,
+          lutProgram,
           systemProgram: SystemProgram.programId,
+          arciumProgram,
         })
         .signers([admin])
         .rpc({ commitment: "confirmed" });

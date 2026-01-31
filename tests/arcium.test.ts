@@ -176,10 +176,10 @@ describe("Arcium Init Planet", () => {
     expect(bodyAccount.planetHash).toEqual(Array.from(coord.hash));
     expect(bodyAccount.staticEncPubkey.length).toBe(32);
     expect(bodyAccount.staticEncNonce.length).toBe(16);
-    expect(bodyAccount.staticEncCiphertexts.length).toBe(12);
+    expect(bodyAccount.staticEncCiphertexts.length).toBe(4);
     expect(bodyAccount.dynamicEncPubkey.length).toBe(32);
     expect(bodyAccount.dynamicEncNonce.length).toBe(16);
-    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(4);
+    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(2);
 
     // Each static ciphertext should be 32 bytes
     for (const ct of bodyAccount.staticEncCiphertexts) {
@@ -286,8 +286,8 @@ describe("Arcium Init Spawn Planet", () => {
     // Verify encrypted celestial body was created
     const bodyAccount = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(bodyAccount.planetHash).toEqual(Array.from(spawn.hash));
-    expect(bodyAccount.staticEncCiphertexts.length).toBe(12);
-    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(4);
+    expect(bodyAccount.staticEncCiphertexts.length).toBe(4);
+    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(2);
   });
 
   it("rejects spawn when player already spawned", async () => {
@@ -397,9 +397,9 @@ describe("Arcium Process Move", () => {
       target.y,
     );
 
-    // Compute landing slot for the move
+    // Compute landing slot for the move (game_speed=10000, velocity=2, scale=10000)
     const distance = BigInt(Math.abs(Number(target.x - source.x)) + Math.abs(Number(target.y - source.y)));
-    const landingSlot = currentSlot + (distance * 10000n) / 2n; // approximate
+    const landingSlot = currentSlot + (distance * 1000n) / (2n * 10000n);
 
     const { computationOffset: moveCO } = await queueProcessMove(
       program,
@@ -507,9 +507,9 @@ describe("Arcium Flush Planet", () => {
       source.x, source.y, target.x, target.y,
     );
 
-    // Compute landing slot
+    // Compute landing slot (game_speed=10000, velocity=2, scale=10000)
     const distance = BigInt(Math.abs(Number(target.x - source.x)) + Math.abs(Number(target.y - source.y)));
-    const landingSlot = currentSlot + (distance * 10000n) / 2n;
+    const landingSlot = currentSlot + (distance * 1000n) / (2n * 10000n);
 
     const { computationOffset: moveCO } = await queueProcessMove(
       program, admin, gameId, sourcePDA, sourcePendingPDA, targetPendingPDA,
@@ -526,7 +526,7 @@ describe("Arcium Flush Planet", () => {
     const flushCount = 1;
     const flushValues = buildFlushPlanetValues(
       flushSlot,
-      10000n,
+      1000n,
       BigInt(targetBody.lastUpdatedSlot.toString()),
       BigInt(flushCount),
     );
@@ -610,7 +610,7 @@ describe("Arcium Upgrade Planet", () => {
       playerId,
       UpgradeFocus.Range,
       currentSlot,
-      10000n,
+      1000n,
       BigInt(bodyBefore.lastUpdatedSlot.toString()),
       metalUpgradeCost
     );

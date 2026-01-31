@@ -33,6 +33,8 @@ stop:
 # ---------------------------------------------------------------------------
 
 build:
+	@mkdir -p target/deploy
+	@cp keypairs/encrypted_forest-keypair.json target/deploy/encrypted_forest-keypair.json
 	arcium build
 
 deploy:

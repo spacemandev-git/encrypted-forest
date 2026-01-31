@@ -27,6 +27,7 @@ ADMIN_KP="${PROJECT_ROOT}/admin.json"
 ARX_KEYS_DIR="${PROJECT_ROOT}/arx-keys"
 CLUSTER_OFFSET=0
 NUM_NODES=3
+PROGRAM_KP="${PROJECT_ROOT}/keypairs/encrypted_forest-keypair.json"
 
 # Node offsets start at 1 (offset 0 is reserved by the Arcium network program)
 NODE_OFFSET_START=1
@@ -457,6 +458,10 @@ BUILD_PID=""
 
 if [ "$SKIP_BUILD" = false ]; then
   step_start 3 "Building program (background)"
+  task "Copying static program keypair to target/deploy/"
+  mkdir -p "${PROJECT_ROOT}/target/deploy"
+  cp "$PROGRAM_KP" "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json"
+  ok "Static keypair in place"
   task "Running arcium build in background"
   cd "$PROJECT_ROOT"
   (
@@ -838,7 +843,7 @@ if [ "$SKIP_DEPLOY" = false ]; then
 
   # Initialize MXE separately with explicit --authority so admin.json is the MXE authority.
   # This ensures init-comp-defs.ts (which signs with admin.json) passes the authority check.
-  PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo "")
+  PROGRAM_ID=$(solana address --keypair "$PROGRAM_KP" 2>/dev/null || echo "")
   ADMIN_PUBKEY=$(solana address --keypair "$ADMIN_KP" 2>/dev/null || echo "")
   if [ -n "$PROGRAM_ID" ] && [ -n "$ADMIN_PUBKEY" ]; then
     task "Initializing MXE (authority=${ADMIN_PUBKEY})"
@@ -862,7 +867,7 @@ if [ "$SKIP_DEPLOY" = false ]; then
 
   # Finalize MXE keys — ARX nodes must complete DKG first, so retry with backoff
   # Only attempt if deploy/init-mxe actually succeeded (MXE account must exist)
-  PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo "")
+  PROGRAM_ID=$(solana address --keypair "$PROGRAM_KP" 2>/dev/null || echo "")
   if [ "$DEPLOY_OK" = true ] && [ -n "$PROGRAM_ID" ]; then
     task "Waiting for DKG completion, then finalizing MXE keys"
     FINALIZE_MAX=30
@@ -986,7 +991,7 @@ step_done
 stop_heartbeat
 
 FINAL_ELAPSED=$(elapsed)
-FINAL_PROGRAM_ID=$(solana address --keypair "${PROJECT_ROOT}/target/deploy/encrypted_forest-keypair.json" 2>/dev/null || echo 'unknown')
+FINAL_PROGRAM_ID=$(solana address --keypair "$PROGRAM_KP" 2>/dev/null || echo 'unknown')
 
 echo -e "" >&2
 echo -e "${BOLD}${GREEN}  ╔═══════════════════════════════════════════════════╗${RESET}" >&2

@@ -47,7 +47,7 @@ interface CelestialBodyProperties {
 }
 
 function cometFromByte(b: number): number {
-  return b % 6;
+  return (b % 6) + 1;
 }
 
 function determineCelestialBody(
@@ -91,27 +91,19 @@ function determineCelestialBody(
     size = 6;
   }
 
-  // Comets
-  let numComets: number;
-  if (byte3 <= 216) {
-    numComets = 0;
-  } else if (byte3 <= 242) {
-    numComets = 1;
-  } else {
-    numComets = 2;
+  // Comets: byte3 thresholds, values 1-6 (0 = no comet)
+  const comet0Raw = cometFromByte(byte4);
+  let comet1Raw = cometFromByte(byte5);
+  if (comet1Raw === comet0Raw) {
+    comet1Raw = cometFromByte((byte5 + 1) & 0xff);
   }
 
+  const comet0 = byte3 > 216 ? comet0Raw : 0;
+  const comet1 = byte3 > 242 ? comet1Raw : 0;
+
   const comets: number[] = [];
-  if (numComets >= 1) {
-    comets.push(cometFromByte(byte4));
-  }
-  if (numComets >= 2) {
-    let second = cometFromByte(byte5);
-    if (second === comets[0]) {
-      second = cometFromByte((byte5 + 1) & 0xff);
-    }
-    comets.push(second);
-  }
+  if (comet0 !== 0) comets.push(comet0);
+  if (comet1 !== 0) comets.push(comet1);
 
   return { bodyType, size, comets };
 }

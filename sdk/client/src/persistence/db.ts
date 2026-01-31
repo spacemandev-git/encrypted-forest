@@ -33,11 +33,11 @@ export interface PersistedPlanet {
   /** Static encryption section cached from chain (optional, for faster reload) */
   staticEncPubkey?: number[];       // x25519 pubkey bytes
   staticEncNonce?: number[];        // encryption nonce bytes (16)
-  staticEncCiphertexts?: number[];  // 12 ciphertexts flattened (12 * 32 bytes)
+  staticEncCiphertexts?: number[];  // 4 packed FE ciphertexts flattened (4 * 32 bytes)
   /** Dynamic encryption section cached from chain */
   dynamicEncPubkey?: number[];      // x25519 pubkey bytes
   dynamicEncNonce?: number[];       // encryption nonce bytes (16)
-  dynamicEncCiphertexts?: number[]; // 4 ciphertexts flattened (4 * 32 bytes)
+  dynamicEncCiphertexts?: number[]; // 2 packed FE ciphertexts flattened (2 * 32 bytes)
 }
 
 /**

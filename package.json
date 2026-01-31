@@ -23,7 +23,7 @@
     "clean": "make clean"
   },
   "dependencies": {
-    "@arcium-hq/client": "0.6.5",
+    "@arcium-hq/client": "0.6.6",
     "@coral-xyz/anchor": "^0.32.1",
     "@noble/hashes": "^2.0.1",
     "@solana/web3.js": "^1.98.4"

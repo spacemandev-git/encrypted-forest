@@ -2,5 +2,40 @@
 // Schema version: 1
 import { createPacker } from '@arcium-hq/client';
 
+export interface [u64;11] {
+    : (number | bigint)[];
+}
+
+export interface [u64;11]Output {
+    : bigint[];
+}
+
+export interface [u64;4] {
+    : (number | bigint)[];
+}
+
+export interface [u64;4]Output {
+    : bigint[];
+}
+
 export const circuits = {
+    [u64;11]: createPacker<[u64;11], [u64;11]Output>([
+        { name: '[0]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[1]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[2]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[3]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[4]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[5]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[6]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[7]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[8]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[9]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[10]', type: { Integer: { signed: false, width: 64 } } },
+    ] as const, '[u64;11]'),
+    [u64;4]: createPacker<[u64;4], [u64;4]Output>([
+        { name: '[0]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[1]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[2]', type: { Integer: { signed: false, width: 64 } } },
+        { name: '[3]', type: { Integer: { signed: false, width: 64 } } },
+    ] as const, '[u64;4]'),
 } as const;

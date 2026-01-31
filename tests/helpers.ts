@@ -39,6 +39,7 @@ import {
   getExecutingPoolAccAddress,
   getMXEPublicKey,
   getArciumProgramId,
+  getLookupTableAddress,
   RescueCipher,
   x25519,
   deserializeLE,
@@ -67,12 +68,12 @@ export enum CelestialBodyType {
 }
 
 export enum CometBoost {
-  ShipCapacity = 0,
-  MetalCapacity = 1,
-  ShipGenSpeed = 2,
-  MetalGenSpeed = 3,
-  Range = 4,
-  LaunchVelocity = 5,
+  ShipCapacity = 1,
+  MetalCapacity = 2,
+  ShipGenSpeed = 3,
+  MetalGenSpeed = 4,
+  Range = 5,
+  LaunchVelocity = 6,
 }
 
 export enum UpgradeFocus {
@@ -126,7 +127,7 @@ export const DEFAULT_THRESHOLDS: NoiseThresholds = {
   sizeThreshold5: 214,
 };
 
-export const DEFAULT_GAME_SPEED = new BN(10000);
+export const DEFAULT_GAME_SPEED = new BN(1000);
 export const DEFAULT_MAP_DIAMETER = new BN(1000);
 
 // ---------------------------------------------------------------------------
@@ -156,21 +157,7 @@ export function computePlanetHash(
 // ---------------------------------------------------------------------------
 
 function cometFromByte(b: number): CometBoost {
-  const m = b % 6;
-  switch (m) {
-    case 0:
-      return CometBoost.ShipCapacity;
-    case 1:
-      return CometBoost.MetalCapacity;
-    case 2:
-      return CometBoost.ShipGenSpeed;
-    case 3:
-      return CometBoost.MetalGenSpeed;
-    case 4:
-      return CometBoost.Range;
-    default:
-      return CometBoost.LaunchVelocity;
-  }
+  return ((b % 6) + 1) as CometBoost;
 }
 
 export function determineCelestialBody(
@@ -214,26 +201,19 @@ export function determineCelestialBody(
     size = 6;
   }
 
-  let numComets: number;
-  if (byte3 <= 216) {
-    numComets = 0;
-  } else if (byte3 <= 242) {
-    numComets = 1;
-  } else {
-    numComets = 2;
+  // Comet determination: byte3 thresholds, values 1-6 (0 = no comet)
+  const comet0Raw = cometFromByte(byte4);
+  let comet1Raw = cometFromByte(byte5);
+  if (comet1Raw === comet0Raw) {
+    comet1Raw = cometFromByte((byte5 + 1) & 0xff);
   }
 
+  const comet0 = byte3 > 216 ? comet0Raw : 0;
+  const comet1 = byte3 > 242 ? comet1Raw : 0;
+
   const comets: CometBoost[] = [];
-  if (numComets >= 1) {
-    comets.push(cometFromByte(byte4));
-  }
-  if (numComets >= 2) {
-    let second = cometFromByte(byte5);
-    if (second === comets[0]) {
-      second = cometFromByte((byte5 + 1) & 0xff);
-    }
-    comets.push(second);
-  }
+  if (comet0 !== 0) comets.push(comet0 as CometBoost);
+  if (comet1 !== 0) comets.push(comet1 as CometBoost);
 
   return { bodyType, size, comets };
 }
@@ -295,23 +275,24 @@ export function applyCometBoosts(
 ): BaseStats {
   const result = { ...stats };
   for (const comet of comets) {
+    if (comet === 0) continue; // 0 = no comet
     switch (comet) {
-      case CometBoost.ShipCapacity:
+      case CometBoost.ShipCapacity:   // 1
         result.maxShipCapacity *= 2;
         break;
-      case CometBoost.MetalCapacity:
+      case CometBoost.MetalCapacity:  // 2
         result.maxMetalCapacity *= 2;
         break;
-      case CometBoost.ShipGenSpeed:
+      case CometBoost.ShipGenSpeed:   // 3
         result.shipGenSpeed *= 2;
         break;
-      case CometBoost.MetalGenSpeed:
+      case CometBoost.MetalGenSpeed:  // 4
         result.metalGenSpeed *= 2;
         break;
-      case CometBoost.Range:
+      case CometBoost.Range:          // 5
         result.range *= 2;
         break;
-      case CometBoost.LaunchVelocity:
+      case CometBoost.LaunchVelocity: // 6
         result.launchVelocity *= 2;
         break;
     }
@@ -354,7 +335,7 @@ export function computeLandingSlot(
   gameSpeed: bigint
 ): bigint {
   if (launchVelocity === 0n) return BigInt(Number.MAX_SAFE_INTEGER);
-  const travelTime = (distance * gameSpeed) / launchVelocity;
+  const travelTime = (distance * gameSpeed) / (launchVelocity * 10000n);
   return currentSlot + travelTime;
 }
 
@@ -750,6 +731,8 @@ export async function initAllCompDefs(
 ): Promise<void> {
   const mxeAccount = getMXEAccAddress(program.programId);
   const arciumProgram = getArciumProgramId();
+  const addressLookupTable = getLookupTableAddress(program.programId);
+  const lutProgram = new PublicKey("AddressLookupTab1e1111111111111111111111111");
 
   const compDefNames = [
     "init_planet",
@@ -779,8 +762,10 @@ export async function initAllCompDefs(
           payer: payer.publicKey,
           mxeAccount,
           compDefAccount: compDefAddress,
-          arciumProgram,
+          addressLookupTable,
+          lutProgram,
           systemProgram: SystemProgram.programId,
+          arciumProgram,
         })
         .signers([payer])
         .rpc({ commitment: "confirmed" });
@@ -1128,6 +1113,12 @@ export async function queueProcessMove(
 ): Promise<{ computationOffset: BN }> {
   const [gamePDA] = deriveGamePDA(gameId, program.programId);
 
+  // Fetch target pending to compute the PendingMoveAccount PDA
+  const pendingData = await program.account.pendingMovesMetadata.fetch(targetPending);
+  const predictedMoveId = BigInt(pendingData.nextMoveId.toString()) + BigInt(pendingData.queuedCount);
+  const targetPlanetHash = new Uint8Array(pendingData.planetHash);
+  const [moveAccountPDA] = derivePendingMoveAccountPDA(gameId, targetPlanetHash, predictedMoveId, program.programId);
+
   const moveNonce = randomBytes(16);
   const moveNonceValue = deserializeLE(moveNonce);
   const { packed: movePacked } = encryptAndPack(encCtx.cipher, moveValues, moveNonce);
@@ -1155,6 +1146,7 @@ export async function queueProcessMove(
       sourceBody,
       sourcePending,
       targetPending,
+      moveAccount: moveAccountPDA,
       ...arciumAccts,
     })
     .signers([payer])

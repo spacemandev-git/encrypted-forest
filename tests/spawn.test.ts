@@ -33,6 +33,7 @@ import {
   determineCelestialBody,
   baseStats,
   applyCometBoosts,
+  CometBoost,
   findSpawnPlanet,
   findPlanetOfType,
   findDeadSpace,
@@ -96,10 +97,8 @@ describe("Planet Hash and Noise (Client-Side)", () => {
 
   it("applyCometBoosts doubles the correct stat", () => {
     const stats = baseStats(CelestialBodyType.Planet, 2);
-    const boosted = applyCometBoosts(stats, [CelestialBodyType.Planet as any]);
-    // CometBoost.ShipCapacity = 0 = CelestialBodyType.Planet, but we test with actual enum
-    const boosted2 = applyCometBoosts(stats, [0 as any]); // ShipCapacity
-    expect(boosted2.maxShipCapacity).toBe(stats.maxShipCapacity * 2);
+    const boosted = applyCometBoosts(stats, [CometBoost.ShipCapacity]);
+    expect(boosted.maxShipCapacity).toBe(stats.maxShipCapacity * 2);
   });
 
   it("finds different body types", () => {
@@ -200,8 +199,8 @@ describe("Queue Init Planet", () => {
     // Verify EncryptedCelestialBody account
     const body = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(body.planetHash).toEqual(Array.from(coord.hash));
-    expect(body.staticEncCiphertexts.length).toBe(12);
-    expect(body.dynamicEncCiphertexts.length).toBe(4);
+    expect(body.staticEncCiphertexts.length).toBe(4);
+    expect(body.dynamicEncCiphertexts.length).toBe(2);
     expect(Number(body.lastUpdatedSlot)).toBeGreaterThan(0);
 
     // Verify PendingMovesMetadata account

@@ -45,6 +45,8 @@ export interface QueueProcessMoveArgs {
   sourcePending: PublicKey;
   /** Target planet's pending moves metadata (mut, for adding move entry) */
   targetPending: PublicKey;
+  /** PendingMoveAccount PDA (init'd here, populated by callback) */
+  moveAccount: PublicKey;
 }
 
 /**
@@ -75,6 +77,7 @@ export function buildQueueProcessMoveIx(
       sourceBody: args.sourceBody,
       sourcePending: args.sourcePending,
       targetPending: args.targetPending,
+      moveAccount: args.moveAccount,
       signPdaAccount: arciumAccounts.signPdaAccount,
       mxeAccount: arciumAccounts.mxeAccount,
       mempoolAccount: arciumAccounts.mempoolAccount,

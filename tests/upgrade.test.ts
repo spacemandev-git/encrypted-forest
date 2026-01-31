@@ -155,7 +155,7 @@ describe("Queue Upgrade Planet", () => {
       1n,
       UpgradeFocus.Range,
       currentSlot,
-      10000n,
+      1000n,
       BigInt(bodyBefore.lastUpdatedSlot.toString()),
       upgradeCost(1)
     );
@@ -213,7 +213,7 @@ describe("Queue Upgrade Planet", () => {
       1n,
       UpgradeFocus.LaunchVelocity,
       currentSlot,
-      10000n,
+      1000n,
       BigInt(bodyBefore.lastUpdatedSlot.toString()),
       upgradeCost(1)
     );

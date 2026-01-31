@@ -288,6 +288,15 @@ function buildProcessMoveValues(
   ];
 }
 
+async function waitForSlot(connection: Connection, targetSlot: bigint, label: string) {
+  let current = BigInt(await connection.getSlot("confirmed"));
+  while (current < targetSlot) {
+    info(`Waiting for slot ${targetSlot} (current: ${current}) — ${label}`);
+    await new Promise(r => setTimeout(r, 500));
+    current = BigInt(await connection.getSlot("confirmed"));
+  }
+}
+
 function buildFlushPlanetValues(
   currentSlot: bigint, gameSpeed: bigint,
   lastUpdatedSlot: bigint, flushCount: bigint
@@ -309,7 +318,7 @@ function computeCurrentResource(
 ): bigint {
   if (genSpeed === 0n || gameSpeed === 0n || currentSlot <= lastUpdatedSlot) return lastCount;
   const elapsed = currentSlot - lastUpdatedSlot;
-  const generated = genSpeed * elapsed / gameSpeed;
+  const generated = genSpeed * elapsed * 10000n / gameSpeed;
   const total = lastCount + generated;
   return total > maxCapacity ? maxCapacity : total;
 }
@@ -381,7 +390,7 @@ async function main() {
   const createGameArgs: CreateGameArgs = {
     gameId,
     mapDiameter: 1000n,
-    gameSpeed: 10000n,
+    gameSpeed: 1000n,
     startSlot: 0n,
     endSlot: 1_000_000_000n,
     winCondition: { pointsBurning: { pointsPerMetal: 1n } },
@@ -400,7 +409,7 @@ async function main() {
   info(`Game ID: ${gameId}`);
   info(`Game PDA: ${gamePDA.toString()}`);
   info(`Map diameter: 1000`);
-  info(`Game speed: 10000`);
+  info(`Game speed: 1000 (10x faster)`);
   ok("Game created");
 
   // Verify comp defs are initialized
@@ -614,7 +623,7 @@ async function main() {
 
   const nearbyBody = await program.account.encryptedCelestialBody.fetch(nearbyPlanetPDA);
   assert(
-    nearbyBody.staticEncCiphertexts.length === 12,
+    nearbyBody.staticEncCiphertexts.length === 4,
     `Planet initialized: ${nearbyPlanetPDA.toString().slice(0, 16)}...`,
     "Failed to initialize nearby planet"
   );
@@ -635,7 +644,7 @@ async function main() {
 
   const dist1 = computeDistance(aliceSpawn.x, aliceSpawn.y, nearbyPlanet.x, nearbyPlanet.y);
   info(`Distance: ${dist1}`);
-  const landingSlot1 = computeLandingSlot(currentSlot1, dist1, 2n, 10000n);
+  const landingSlot1 = computeLandingSlot(currentSlot1, dist1, 2n, 1000n);
   info(`Landing slot: ${landingSlot1} (current: ${currentSlot1})`);
 
   const moveValues1 = buildProcessMoveValues(
@@ -661,7 +670,7 @@ async function main() {
       landingSlot: landingSlot1,
       currentShips: computeCurrentResource(
         0n, 100n, 1n,
-        BigInt(aliceBody.lastUpdatedSlot.toString()), currentSlot1, 10000n
+        BigInt(aliceBody.lastUpdatedSlot.toString()), currentSlot1, 1000n
       ),
       currentMetal: 0n,
       moveCts: movePacked1,
@@ -671,6 +680,7 @@ async function main() {
       sourceBody: alicePlanetPDA,
       sourcePending: aliceSourcePendingPDA,
       targetPending: nearbyPendingPDA,
+      moveAccount: derivePendingMoveAccountPDA(gameId, nearbyHash, 0n, program.programId)[0],
     }, moveArcium1)
     .signers([alice])
     .rpc({ skipPreflight: true, commitment: "confirmed" });
@@ -700,7 +710,7 @@ async function main() {
 
   const dist2 = computeDistance(bobSpawn.x, bobSpawn.y, aliceSpawn.x, aliceSpawn.y);
   info(`Attack distance: ${dist2}`);
-  const landingSlot2 = computeLandingSlot(currentSlot2, dist2, 2n, 10000n);
+  const landingSlot2 = computeLandingSlot(currentSlot2, dist2, 2n, 1000n);
   info(`Landing slot: ${landingSlot2}`);
 
   const moveValues2 = buildProcessMoveValues(
@@ -726,7 +736,7 @@ async function main() {
       landingSlot: landingSlot2,
       currentShips: computeCurrentResource(
         0n, 100n, 1n,
-        BigInt(bobBody.lastUpdatedSlot.toString()), currentSlot2, 10000n
+        BigInt(bobBody.lastUpdatedSlot.toString()), currentSlot2, 1000n
       ),
       currentMetal: 0n,
       moveCts: movePacked2,
@@ -736,6 +746,7 @@ async function main() {
       sourceBody: bobPlanetPDA,
       sourcePending: bobSourcePendingPDA,
       targetPending: aliceSourcePendingPDA,
+      moveAccount: derivePendingMoveAccountPDA(gameId, aliceSourceHash, 0n, program.programId)[0],
     }, moveArcium2)
     .signers([bob])
     .rpc({ skipPreflight: true, commitment: "confirmed" });
@@ -757,6 +768,9 @@ async function main() {
   // =========================================================================
   const s7 = stepStart("Flush nearby planet — Alice's ships land");
 
+  // Wait for Alice's ships to land before flushing
+  await waitForSlot(connection, landingSlot1, "Alice's ships landing");
+
   const nearbyBodyForFlush = await program.account.encryptedCelestialBody.fetch(nearbyPlanetPDA);
   const nearbyPendingForFlush = await program.account.pendingMovesMetadata.fetch(nearbyPendingPDA);
 
@@ -764,7 +778,7 @@ async function main() {
     const flushSlot = BigInt(await connection.getSlot("confirmed"));
     const flushCount = 1;
     const flushValues = buildFlushPlanetValues(
-      flushSlot, 10000n,
+      flushSlot, 1000n,
       BigInt(nearbyBodyForFlush.lastUpdatedSlot.toString()),
       BigInt(flushCount),
     );
@@ -814,6 +828,9 @@ async function main() {
   // =========================================================================
   const s8 = stepStart("Flush Alice's spawn — Bob's attack lands (combat!)");
 
+  // Wait for Bob's attack to land before flushing
+  await waitForSlot(connection, landingSlot2, "Bob's attack landing");
+
   const aliceBodyForFlush = await program.account.encryptedCelestialBody.fetch(alicePlanetPDA);
   const alicePendingForFlush = await program.account.pendingMovesMetadata.fetch(aliceSourcePendingPDA);
 
@@ -821,7 +838,7 @@ async function main() {
     const flushSlot2 = BigInt(await connection.getSlot("confirmed"));
     const flushCount2 = 1;
     const flushValues2 = buildFlushPlanetValues(
-      flushSlot2, 10000n,
+      flushSlot2, 1000n,
       BigInt(aliceBodyForFlush.lastUpdatedSlot.toString()),
       BigInt(flushCount2),
     );
@@ -885,7 +902,7 @@ async function main() {
     1n,                // playerId
     UpgradeFocus.Range,
     currentSlot3,
-    10000n,            // gameSpeed
+    1000n,            // gameSpeed
     BigInt(nearbyBodyForUpgrade.lastUpdatedSlot.toString()),
     100n,              // metalUpgradeCost (level 0 base)
   );
