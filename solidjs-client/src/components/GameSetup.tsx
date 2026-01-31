@@ -27,7 +27,7 @@ export default function GameSetup(props: GameSetupProps) {
   // Create state
   const [createGameId, setCreateGameId] = createSignal("1");
   const [mapDiameter, setMapDiameter] = createSignal("100");
-  const [gameSpeed, setGameSpeed] = createSignal("1");
+  const [gameSpeed, setGameSpeed] = createSignal("10000");
   const [hashRounds, setHashRounds] = createSignal(DEFAULT_HASH_ROUNDS.toString());
   const [winConditionType, setWinConditionType] = createSignal<"points" | "race">("points");
   const [pointsPerMetal, setPointsPerMetal] = createSignal("1");
@@ -68,7 +68,7 @@ export default function GameSetup(props: GameSetupProps) {
     try { diameter = BigInt(mapDiameter().trim() || "100"); } catch { setCreateError("Map diameter must be a number"); return; }
 
     let speed: bigint;
-    try { speed = BigInt(gameSpeed().trim() || "1"); } catch { setCreateError("Game speed must be a number"); return; }
+    try { speed = BigInt(gameSpeed().trim() || "10000"); } catch { setCreateError("Game speed must be a number"); return; }
 
     const rounds = parseInt(hashRounds().trim()) || DEFAULT_HASH_ROUNDS;
 
@@ -91,7 +91,7 @@ export default function GameSetup(props: GameSetupProps) {
       mapDiameter: diameter,
       gameSpeed: speed,
       startSlot: 0n,
-      endSlot: 0n,
+      endSlot: 1_000_000_000n,
       winCondition,
       whitelist: false,
       serverPubkey: null,
@@ -251,7 +251,7 @@ export default function GameSetup(props: GameSetupProps) {
 
           <div style={{ display: "flex", gap: "8px" }}>
             <div style={{ flex: "1" }}>
-              <Field label="GAME SPEED" value={gameSpeed()} onInput={setGameSpeed} placeholder="1" />
+              <Field label="GAME SPEED" value={gameSpeed()} onInput={setGameSpeed} placeholder="10000" />
             </div>
             <div style={{ flex: "1" }}>
               <Field label="HASH ROUNDS" value={hashRounds()} onInput={setHashRounds} placeholder="100" />

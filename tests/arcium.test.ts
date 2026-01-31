@@ -9,19 +9,13 @@
  * 5. queue_flush_planet -> verify state updated + move removed
  * 6. queue_upgrade_planet -> verify encrypted state updated
  *
- * IMPORTANT: These tests require the full Arcium local environment:
- * - Surfpool running at localhost:8899
- * - Arcium ARX nodes running (via Docker or arcium localnet)
- * - Program deployed and MXE initialized
- *
- * Run with: arcium test
+ * REQUIRES: Surfpool + Arcium ARX nodes running
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
 import * as anchor from "@coral-xyz/anchor";
 import { Program, AnchorProvider, BN } from "@coral-xyz/anchor";
 import { Keypair, SystemProgram, PublicKey } from "@solana/web3.js";
-import { randomBytes } from "crypto";
 import type { EncryptedForest } from "../target/types/encrypted_forest";
 import {
   getProviderAndProgram,
@@ -52,8 +46,6 @@ import {
   getArciumEnv,
   getCompDefAccAddress,
   getCompDefAccOffset,
-  RescueCipher,
-  x25519,
   DEFAULT_THRESHOLDS,
   CelestialBodyType,
   UpgradeFocus,
@@ -645,95 +637,5 @@ describe("Arcium Upgrade Planet", () => {
     const beforeAll = beforeStaticNonce + staticCtsBefore + beforeDynamicNonce + dynamicCtsBefore;
     const afterAll = afterStaticNonce + staticCtsAfter + afterDynamicNonce + dynamicCtsAfter;
     expect(beforeAll).not.toBe(afterAll);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Fog of War - Encrypted Events (client-side crypto tests)
-// ---------------------------------------------------------------------------
-
-describe("Fog of War - Encrypted Events", () => {
-  it("verifies encryption/decryption with correct shared secret", () => {
-    const aliceSecret = x25519.utils.randomSecretKey();
-    const alicePublic = x25519.getPublicKey(aliceSecret);
-
-    const bobSecret = x25519.utils.randomSecretKey();
-    const bobPublic = x25519.getPublicKey(bobSecret);
-
-    const sharedFromAlice = x25519.getSharedSecret(aliceSecret, bobPublic);
-    const sharedFromBob = x25519.getSharedSecret(bobSecret, alicePublic);
-
-    const cipherAlice = new RescueCipher(sharedFromAlice);
-    const cipherBob = new RescueCipher(sharedFromBob);
-
-    const plaintext = [42n, 100n, 255n];
-    const nonce = randomBytes(16);
-
-    const encrypted = cipherAlice.encrypt(plaintext, nonce);
-    const decrypted = cipherBob.decrypt(encrypted, nonce);
-
-    expect(decrypted).toEqual(plaintext);
-  });
-
-  it("fails decryption with wrong shared secret", () => {
-    const aliceSecret = x25519.utils.randomSecretKey();
-    const alicePublic = x25519.getPublicKey(aliceSecret);
-
-    const bobSecret = x25519.utils.randomSecretKey();
-    const bobPublic = x25519.getPublicKey(bobSecret);
-
-    const eveSecret = x25519.utils.randomSecretKey();
-
-    const sharedCorrect = x25519.getSharedSecret(aliceSecret, bobPublic);
-    const sharedWrong = x25519.getSharedSecret(eveSecret, bobPublic);
-
-    const cipherCorrect = new RescueCipher(sharedCorrect);
-    const cipherWrong = new RescueCipher(sharedWrong);
-
-    const plaintext = [42n, 100n, 255n];
-    const nonce = randomBytes(16);
-
-    const encrypted = cipherCorrect.encrypt(plaintext, nonce);
-
-    const decryptedWrong = cipherWrong.decrypt(encrypted, nonce);
-    expect(decryptedWrong).not.toEqual(plaintext);
-  });
-
-  it("demonstrates planet hash as fog of war secret", () => {
-    const x = 42n;
-    const y = -17n;
-    const gameId = 99n;
-
-    const hash = computePlanetHash(x, y, gameId);
-    expect(hash.length).toBe(32);
-
-    // Deterministic: same inputs produce same hash
-    const hash2 = computePlanetHash(x, y, gameId);
-    expect(hash).toEqual(hash2);
-
-    // One-way: different inputs produce different hashes
-    const wrongHash = computePlanetHash(x + 1n, y, gameId);
-    expect(hash).not.toEqual(wrongHash);
-  });
-
-  it("shows planet hash can seed x25519 key for decryption", () => {
-    const x = 42n;
-    const y = -17n;
-    const gameId = 123n;
-
-    // The planet hash (32 bytes) can be used as an x25519 private key
-    const hash = computePlanetHash(x, y, gameId);
-    const planetPrivateKey = hash;
-    const planetPublicKey = x25519.getPublicKey(planetPrivateKey);
-
-    // Anyone who knows (x, y, gameId) can derive the same key
-    const hash2 = computePlanetHash(x, y, gameId);
-    const planetPublicKey2 = x25519.getPublicKey(hash2);
-    expect(planetPublicKey).toEqual(planetPublicKey2);
-
-    // Someone without (x, y) cannot derive the key
-    const wrongHash = computePlanetHash(x + 1n, y, gameId);
-    const wrongPublicKey = x25519.getPublicKey(wrongHash);
-    expect(planetPublicKey).not.toEqual(wrongPublicKey);
   });
 });

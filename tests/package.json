@@ -1,5 +1,8 @@
 {
   "name": "encrypted-forest-tests",
   "private": true,
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "dependencies": {
+    "@encrypted-forest/core": "workspace:*"
+  }
 }

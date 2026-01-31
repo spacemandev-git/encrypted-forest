@@ -5,9 +5,7 @@
   "description": "Solana blockchain game with Arcium MPC fog-of-war mechanics",
   "workspaces": [
     "sdk/core",
-    "sdk/client",
     "sdk/solidjs-sdk",
-    "client",
     "solidjs-client",
     "tests"
   ],

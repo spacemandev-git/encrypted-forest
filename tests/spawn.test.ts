@@ -4,12 +4,8 @@
  * Tests the encrypted spawn flow:
  * - queue_init_planet: creates EncryptedCelestialBody + EncryptedPendingMoves via MPC
  * - queue_init_spawn_planet: same as init_planet but also sets player.has_spawned
- * - Hash validation and noise function (client-side unit tests)
- * - PDA derivation verification
  *
- * NOTE: All planet creation now goes through MPC. There is no plaintext
- * create_planet instruction. These tests verify the queue instructions
- * and their constraints, plus the client-side noise/hash logic.
+ * REQUIRES: Surfpool + Arcium ARX nodes running
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -29,14 +25,8 @@ import {
   queueInitSpawnPlanet,
   derivePlanetPDA,
   derivePendingMovesPDA,
-  computePlanetHash,
-  determineCelestialBody,
-  baseStats,
-  applyCometBoosts,
-  CometBoost,
   findSpawnPlanet,
   findPlanetOfType,
-  findDeadSpace,
   nextGameId,
   awaitComputationFinalization,
   getArciumEnv,
@@ -44,111 +34,6 @@ import {
   DEFAULT_THRESHOLDS,
   EncryptionContext,
 } from "./helpers";
-
-// ---------------------------------------------------------------------------
-// Client-side noise / hash / finder unit tests (no Arcium required)
-// ---------------------------------------------------------------------------
-
-describe("Planet Hash and Noise (Client-Side)", () => {
-  it("finds valid spawn coordinates via brute force", () => {
-    const gameId = nextGameId();
-    const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
-
-    expect(spawn.props.bodyType).toBe(CelestialBodyType.Planet);
-    expect(spawn.props.size).toBe(1);
-    expect(spawn.hash.length).toBe(32);
-  });
-
-  it("determineCelestialBody returns null for dead space", () => {
-    const gameId = nextGameId();
-    const deadSpace = findDeadSpace(gameId, DEFAULT_THRESHOLDS);
-    const props = determineCelestialBody(deadSpace.hash, DEFAULT_THRESHOLDS);
-    expect(props).toBeNull();
-  });
-
-  it("determineCelestialBody returns valid properties for a planet", () => {
-    const gameId = nextGameId();
-    const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
-    const props = determineCelestialBody(spawn.hash, DEFAULT_THRESHOLDS);
-
-    expect(props).not.toBeNull();
-    expect(props!.bodyType).toBe(CelestialBodyType.Planet);
-    expect(props!.size).toBeGreaterThanOrEqual(1);
-    expect(props!.size).toBeLessThanOrEqual(6);
-  });
-
-  it("baseStats returns correct stats for each body type", () => {
-    const planetStats = baseStats(CelestialBodyType.Planet, 2);
-    expect(planetStats.maxShipCapacity).toBe(400); // 100 * 2^2
-    expect(planetStats.shipGenSpeed).toBe(2);      // 1 * 2
-    expect(planetStats.range).toBe(5);             // 3 + 2
-    expect(planetStats.launchVelocity).toBe(3);    // 1 + 2
-    expect(planetStats.nativeShips).toBe(20);      // 10 * 2
-
-    const quasarStats = baseStats(CelestialBodyType.Quasar, 3);
-    expect(quasarStats.maxShipCapacity).toBe(4500); // 500 * 9
-    expect(quasarStats.shipGenSpeed).toBe(0);
-    expect(quasarStats.maxMetalCapacity).toBe(4500);
-
-    const asteroidStats = baseStats(CelestialBodyType.AsteroidBelt, 2);
-    expect(asteroidStats.metalGenSpeed).toBe(4);    // 2 * 2
-    expect(asteroidStats.shipGenSpeed).toBe(0);
-  });
-
-  it("applyCometBoosts doubles the correct stat", () => {
-    const stats = baseStats(CelestialBodyType.Planet, 2);
-    const boosted = applyCometBoosts(stats, [CometBoost.ShipCapacity]);
-    expect(boosted.maxShipCapacity).toBe(stats.maxShipCapacity * 2);
-  });
-
-  it("finds different body types", () => {
-    const gameId = nextGameId();
-
-    // Find a larger planet
-    const planet = findPlanetOfType(
-      gameId, DEFAULT_THRESHOLDS, CelestialBodyType.Planet, 2
-    );
-    expect(planet.props.bodyType).toBe(CelestialBodyType.Planet);
-    expect(planet.props.size).toBeGreaterThanOrEqual(2);
-
-    // Try to find a non-Planet type
-    try {
-      const quasar = findPlanetOfType(
-        gameId, DEFAULT_THRESHOLDS, CelestialBodyType.Quasar, 1
-      );
-      expect(quasar.props.bodyType).toBe(CelestialBodyType.Quasar);
-    } catch {
-      console.log("No Quasar found in search range, skipping");
-    }
-  });
-
-  it("verifies PDA derivation for planet and pending moves", () => {
-    const gameId = nextGameId();
-    const spawn = findSpawnPlanet(gameId, DEFAULT_THRESHOLDS);
-
-    const [planetPDA] = derivePlanetPDA(gameId, spawn.hash);
-    const [pendingPDA] = derivePendingMovesPDA(gameId, spawn.hash);
-
-    // Both should be valid PublicKeys (not throw)
-    expect(planetPDA.toString().length).toBeGreaterThan(0);
-    expect(pendingPDA.toString().length).toBeGreaterThan(0);
-    expect(planetPDA.toString()).not.toBe(pendingPDA.toString());
-  });
-
-  it("produces consistent hashes for same inputs", () => {
-    const x = 42n;
-    const y = -17n;
-    const gameId = 12345n;
-
-    const hash1 = computePlanetHash(x, y, gameId);
-    const hash2 = computePlanetHash(x, y, gameId);
-    expect(hash1).toEqual(hash2);
-
-    // Different inputs produce different hashes
-    const hash3 = computePlanetHash(x + 1n, y, gameId);
-    expect(hash1).not.toEqual(hash3);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Queue Init Planet (MPC)

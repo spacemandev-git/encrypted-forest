@@ -316,12 +316,13 @@ describe("applyDistanceDecay", () => {
 
 describe("computeLandingSlot", () => {
   it("should compute correct landing slot", () => {
-    // travel_time = distance * game_speed / launch_velocity = 10 * 100 / 5 = 200
-    expect(computeLandingSlot(1000n, 10n, 5n, 100n)).toBe(1200n);
+    // travel_time = distance * game_speed / (launch_velocity * 10000)
+    // = 100 * 10000 / (2 * 10000) = 1000000 / 20000 = 50
+    expect(computeLandingSlot(1000n, 100n, 2n, 10000n)).toBe(1050n);
   });
 
   it("should return MAX_SAFE_INTEGER for 0 velocity", () => {
-    const result = computeLandingSlot(1000n, 10n, 0n, 100n);
+    const result = computeLandingSlot(1000n, 10n, 0n, 10000n);
     expect(result).toBe(BigInt(Number.MAX_SAFE_INTEGER));
   });
 });

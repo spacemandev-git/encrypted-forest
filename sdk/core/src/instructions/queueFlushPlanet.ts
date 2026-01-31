@@ -1,9 +1,9 @@
 /**
  * Instruction builder: queue_flush_planet
  *
- * Queues an Arcium flush_planet computation to resolve a batch of up to 4
- * landed moves on a planet. The computation applies combat/reinforcement
- * sequentially and returns updated PlanetDynamic.
+ * Queues an Arcium flush_planet computation to resolve a single landed
+ * move on a planet. The computation applies combat/reinforcement and
+ * returns updated PlanetDynamic. Call multiple times to flush multiple moves.
  *
  * Planet state (static + dynamic) is read by MPC nodes directly from
  * celestial_body via .account() -- NOT passed as ciphertexts.
@@ -19,7 +19,7 @@ import type { ArciumAccounts } from "./arciumAccounts.js";
 
 export interface QueueFlushPlanetArgs {
   computationOffset: bigint;
-  /** Number of moves to flush (1-4) */
+  /** Number of moves to flush (always 1) */
   flushCount: number;
   /** 4 ciphertexts packed as Vec<u8> (4 * 32 = 128 bytes): FlushTimingInput */
   flushCts: Uint8Array;

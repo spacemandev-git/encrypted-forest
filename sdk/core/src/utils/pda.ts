@@ -1,11 +1,10 @@
 import { PublicKey } from "@solana/web3.js";
+import idlJson from "../idl/encrypted_forest.json";
 
 /**
- * Default program ID from declare_id! in lib.rs.
+ * Program ID derived from the IDL (matches declare_id! in lib.rs).
  */
-export const PROGRAM_ID = new PublicKey(
-  "4R4Pxo65rnESAbndivR76UXP9ahX7WxczsZDWcryaM3c"
-);
+export const PROGRAM_ID = new PublicKey(idlJson.address);
 
 // ---------------------------------------------------------------------------
 // Helper: encode a u64/bigint as 8 little-endian bytes

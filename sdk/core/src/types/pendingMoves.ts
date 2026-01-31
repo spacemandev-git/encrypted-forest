@@ -45,8 +45,8 @@ export interface PendingMoveAccount {
 /** Number of encrypted fields in PendingMoveData. */
 export const PENDING_MOVE_DATA_FIELDS = 4;
 
-/** Maximum number of moves flushed in a single batch. */
-export const MAX_FLUSH_BATCH = 4;
+/** Maximum number of moves flushed in a single flush call. */
+export const MAX_FLUSH_BATCH = 1;
 
 /** Maximum number of queued moves per planet. */
 export const MAX_QUEUED_CALLBACKS = 8;

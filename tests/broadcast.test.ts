@@ -7,10 +7,8 @@
  * 3. Reject broadcast with wrong hash
  * 4. Reject broadcast with mismatched coordinates
  * 5. Anyone can broadcast (permissionless)
- * 6. Hash consistency between client and on-chain
  *
- * NOTE: broadcast is an unchanged plaintext instruction.
- * It emits an unencrypted BroadcastEvent with (x, y, game_id, planet_hash, broadcaster).
+ * REQUIRES: Surfpool running
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -25,7 +23,6 @@ import {
   createGame,
   defaultGameConfig,
   deriveGamePDA,
-  computePlanetHash,
   findSpawnPlanet,
   nextGameId,
   DEFAULT_THRESHOLDS,
@@ -172,22 +169,5 @@ describe("Broadcast", () => {
       .rpc({ commitment: "confirmed" });
 
     expect(true).toBe(true);
-  });
-
-  it("verifies hash consistency between client and on-chain", () => {
-    const x = 42n;
-    const y = -17n;
-    const gameId = 12345n;
-
-    const hash = computePlanetHash(x, y, gameId);
-    expect(hash.length).toBe(32);
-
-    // Deterministic
-    const hash2 = computePlanetHash(x, y, gameId);
-    expect(hash).toEqual(hash2);
-
-    // Different inputs produce different hashes
-    const hash3 = computePlanetHash(x + 1n, y, gameId);
-    expect(hash).not.toEqual(hash3);
   });
 });

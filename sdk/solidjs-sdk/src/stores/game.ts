@@ -15,11 +15,15 @@ export interface GameStoreAPI {
   gameId: Accessor<bigint | null>;
   loading: Accessor<boolean>;
   error: Accessor<string | null>;
+  /** Whether the game has started (currentSlot >= startSlot). Call setCurrentSlot() to keep this accurate. */
   started: Accessor<boolean>;
+  /** Whether the game has ended (currentSlot > endSlot). Call setCurrentSlot() to keep this accurate. */
   ended: Accessor<boolean>;
   mapDiameter: Accessor<bigint>;
   gameSpeed: Accessor<bigint>;
   noiseThresholds: Accessor<Game["noiseThresholds"] | null>;
+  /** Update the current slot for started/ended calculations */
+  setCurrentSlot: (slot: bigint) => void;
   load: (gameId: bigint) => Promise<void>;
   refresh: () => Promise<void>;
   destroy: () => void;
@@ -30,15 +34,16 @@ export function createGameStore(client: EncryptedForestClient): GameStoreAPI {
   const [gameId, setGameId] = createSignal<bigint | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [currentSlot, setCurrentSlot] = createSignal<bigint>(0n);
 
   let subscription: Subscription | null = null;
 
   const started = createMemo(
-    () => game() !== null && game()!.startSlot <= BigInt(Date.now())
+    () => game() !== null && currentSlot() >= game()!.startSlot
   );
 
   const ended = createMemo(
-    () => game() !== null && game()!.endSlot <= BigInt(Date.now())
+    () => game() !== null && currentSlot() > game()!.endSlot
   );
 
   const mapDiameter = createMemo(() => game()?.mapDiameter ?? 0n);
@@ -104,6 +109,7 @@ export function createGameStore(client: EncryptedForestClient): GameStoreAPI {
     mapDiameter,
     gameSpeed,
     noiseThresholds,
+    setCurrentSlot,
     load,
     refresh,
     destroy,

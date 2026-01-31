@@ -17,7 +17,6 @@ declare_id!("8BscA3fCxbBTkNCNHSopiQ84Q4A58YYzvQkqwbUM7wqA");
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MAX_FLUSH_BATCH: usize = 4;
 const PLANET_STATIC_FIELDS: usize = 4;   // Pack<[u64;11]> = 88 bytes => ceil(88/26) = 4 FEs
 const PLANET_DYNAMIC_FIELDS: usize = 2;  // Pack<[u64;4]>  = 32 bytes => ceil(32/26) = 2 FEs
 const PENDING_MOVE_DATA_FIELDS: usize = 4;
@@ -28,7 +27,7 @@ const PENDING_MOVE_DATA_FIELDS: usize = 4;
 const PENDING_MOVES_META_BASE_SIZE: usize = 8 + 8 + 32 + 8 + 2 + 1 + 64 + 4;
 // Each PendingMoveEntry: landing_slot(8) + move_id(8)
 const PENDING_MOVE_ENTRY_SIZE: usize = 16;
-// Max queued moves per planet (may require multiple flush calls at MAX_FLUSH_BATCH=4)
+// Max queued moves per planet (requires one flush call per move)
 const MAX_QUEUED_CALLBACKS: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -744,10 +743,10 @@ pub mod encrypted_forest {
     }
 
     // -----------------------------------------------------------------------
-    // Queue flush_planet (batch up to 4 moves)
+    // Queue flush_planet (single move)
     // Planet state (static + dynamic) read via .account() from celestial_body.
-    // Move data read via .account() from PendingMoveAccount PDAs (remaining_accounts).
-    // flush_timing_cts = 4 * 32
+    // Move data read via .account() from PendingMoveAccount PDA (remaining_accounts[0]).
+    // flush_timing_cts = 4 * 32 (FlushTimingInput: current_slot, game_speed, last_updated_slot, flush_count)
     // Output: Enc<Shared, PlanetDynamic> — only dynamic section
     // -----------------------------------------------------------------------
 
@@ -760,44 +759,37 @@ pub mod encrypted_forest {
         flush_nonce: u128,
     ) -> Result<()> {
         require!(flush_cts.len() == 4 * 32, ErrorCode::FlushFailed);
-        require!(flush_count >= 1 && flush_count as usize <= MAX_FLUSH_BATCH, ErrorCode::FlushFailed);
+        require!(flush_count == 1, ErrorCode::FlushFailed);
         require!(
-            ctx.remaining_accounts.len() >= flush_count as usize,
+            ctx.remaining_accounts.len() >= 1,
             ErrorCode::FlushFailed
         );
 
         let clock = Clock::get()?;
         let pending = &ctx.accounts.pending_moves;
 
-        // Verify that the first flush_count moves have landed
+        // Verify that the first move has landed
+        require!(!pending.moves.is_empty(), ErrorCode::FlushFailed);
         require!(
-            pending.moves.len() >= flush_count as usize,
+            pending.moves[0].landing_slot <= clock.slot,
             ErrorCode::FlushFailed
         );
-        for i in 0..flush_count as usize {
-            require!(
-                pending.moves[i].landing_slot <= clock.slot,
-                ErrorCode::FlushFailed
-            );
-        }
 
-        // Validate remaining_accounts are the correct PendingMoveAccount PDAs
-        for i in 0..flush_count as usize {
-            let entry = &pending.moves[i];
-            let (expected_pda, _) = Pubkey::find_program_address(
-                &[
-                    b"move",
-                    pending.game_id.to_le_bytes().as_ref(),
-                    pending.planet_hash.as_ref(),
-                    entry.move_id.to_le_bytes().as_ref(),
-                ],
-                ctx.program_id,
-            );
-            require!(
-                ctx.remaining_accounts[i].key() == expected_pda,
-                ErrorCode::FlushFailed
-            );
-        }
+        // Validate remaining_accounts[0] is the correct PendingMoveAccount PDA
+        let entry = &pending.moves[0];
+        let (expected_pda, _) = Pubkey::find_program_address(
+            &[
+                b"move",
+                pending.game_id.to_le_bytes().as_ref(),
+                pending.planet_hash.as_ref(),
+                entry.move_id.to_le_bytes().as_ref(),
+            ],
+            ctx.program_id,
+        );
+        require!(
+            ctx.remaining_accounts[0].key() == expected_pda,
+            ErrorCode::FlushFailed
+        );
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
@@ -812,30 +804,22 @@ pub mod encrypted_forest {
             .plaintext_u128(u128::from_le_bytes(body.dynamic_enc_nonce))
             .account(body.key(), DYNAMIC_CT_OFFSET, DYNAMIC_CT_SIZE);
 
-        // 4 move slots: active ones read from PendingMoveAccount, inactive padded with zeros
+        // Single move slot: read from PendingMoveAccount
         // Enc<Mxe, T> has nonce + ciphertexts (no pubkey). Read nonce from raw account data,
         // pass via .plaintext_u128(), then .account() for ciphertexts only.
-        for slot_idx in 0..MAX_FLUSH_BATCH {
-            if slot_idx < flush_count as usize {
-                let acc_data = ctx.remaining_accounts[slot_idx].try_borrow_data()?;
-                let nonce_bytes: [u8; 16] = acc_data[MOVE_ACCOUNT_ENC_NONCE_OFFSET..MOVE_ACCOUNT_ENC_NONCE_OFFSET + 16]
-                    .try_into()
-                    .map_err(|_| ErrorCode::FlushFailed)?;
-                drop(acc_data);
-                builder = builder
-                    .plaintext_u128(u128::from_le_bytes(nonce_bytes))
-                    .account(
-                        ctx.remaining_accounts[slot_idx].key(),
-                        MOVE_CT_OFFSET,
-                        MOVE_CT_SIZE,
-                    );
-            } else {
-                // Inactive slot: zero nonce + zero ciphertexts
-                builder = builder.plaintext_u128(0u128);
-                for _ in 0..PENDING_MOVE_DATA_FIELDS {
-                    builder = builder.encrypted_u64([0u8; 32]);
-                }
-            }
+        {
+            let acc_data = ctx.remaining_accounts[0].try_borrow_data()?;
+            let nonce_bytes: [u8; 16] = acc_data[MOVE_ACCOUNT_ENC_NONCE_OFFSET..MOVE_ACCOUNT_ENC_NONCE_OFFSET + 16]
+                .try_into()
+                .map_err(|_| ErrorCode::FlushFailed)?;
+            drop(acc_data);
+            builder = builder
+                .plaintext_u128(u128::from_le_bytes(nonce_bytes))
+                .account(
+                    ctx.remaining_accounts[0].key(),
+                    MOVE_CT_OFFSET,
+                    MOVE_CT_SIZE,
+                );
         }
 
         // FlushTimingInput (4 fields: current_slot, game_speed, last_updated_slot, flush_count)
@@ -909,21 +893,16 @@ pub mod encrypted_forest {
         planet.last_updated_slot = slot;
         planet.last_flushed_slot = slot;
 
-        // Remove flushed entries from front of sorted array
+        // Remove the flushed move from front of sorted array
         let pending = &mut ctx.accounts.pending_moves;
-        let mut flushed = 0;
-        while !pending.moves.is_empty() && pending.moves[0].landing_slot <= slot {
+        if !pending.moves.is_empty() && pending.moves[0].landing_slot <= slot {
             pending.moves.remove(0);
-            flushed += 1;
-            if flushed >= MAX_FLUSH_BATCH {
-                break;
-            }
         }
         pending.move_count = pending.moves.len() as u16;
 
         emit!(FlushPlanetEvent {
             planet_hash: planet.planet_hash,
-            flushed_count: flushed as u8,
+            flushed_count: 1,
         });
 
         Ok(())

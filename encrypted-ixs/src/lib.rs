@@ -600,17 +600,14 @@ mod circuits {
         )
     }
 
-    /// 4. flush_planet: Process a batch of up to 4 landed moves against planet state.
-    /// Input: (PlanetStatic, PlanetDynamic, 4x PendingMoveData, FlushTimingInput)
+    /// 4. flush_planet: Process a single landed move against planet state.
+    /// Input: (PlanetStatic, PlanetDynamic, PendingMoveData, FlushTimingInput)
     /// Output: PlanetDynamic -- only dynamic fields change during flush
     #[instruction]
     pub fn flush_planet(
         static_input: Enc<Shared, PlanetStatic>,
         dynamic_input: Enc<Shared, PlanetDynamic>,
         m0: Enc<Mxe, PendingMoveData>,
-        m1: Enc<Mxe, PendingMoveData>,
-        m2: Enc<Mxe, PendingMoveData>,
-        m3: Enc<Mxe, PendingMoveData>,
         flush_input: Enc<Shared, FlushTimingInput>,
     ) -> Enc<Shared, PlanetDynamic> {
         let ps_data: [u64; 11] = static_input.to_arcis().unpack();
@@ -643,65 +640,15 @@ mod circuits {
             pd_data[PD_METAL]
         };
 
-        // Decrypt all 4 move slots (MPC reads from on-chain accounts)
+        // Decrypt the move slot (MPC reads from on-chain account)
         let d0 = m0.to_arcis();
-        let d1 = m1.to_arcis();
-        let d2 = m2.to_arcis();
-        let d3 = m3.to_arcis();
 
-        // Apply combat sequentially for each active move
-        let mut ships = gen_ships;
-        let mut metal = gen_metal;
-        let mut o_exists = pd_data[PD_OWNER_EXISTS];
-        let mut o_id = pd_data[PD_OWNER_ID];
-
-        // Move 0
-        if fi.flush_count >= 1 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
-                o_exists, o_id, d0.ships_arriving, d0.metal_arriving, d0.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 1
-        if fi.flush_count >= 2 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
-                o_exists, o_id, d1.ships_arriving, d1.metal_arriving, d1.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 2
-        if fi.flush_count >= 3 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
-                o_exists, o_id, d2.ships_arriving, d2.metal_arriving, d2.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
-
-        // Move 3
-        if fi.flush_count >= 4 {
-            let (s, m, oe, oi) = apply_combat(
-                ships, metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
-                o_exists, o_id, d3.ships_arriving, d3.metal_arriving, d3.attacking_player_id,
-            );
-            ships = s;
-            metal = m;
-            o_exists = oe;
-            o_id = oi;
-        }
+        // Apply combat for the single move
+        let (ships, metal, o_exists, o_id) = apply_combat(
+            gen_ships, gen_metal, ps_data[PS_MAX_SHIP_CAP], ps_data[PS_MAX_METAL_CAP],
+            pd_data[PD_OWNER_EXISTS], pd_data[PD_OWNER_ID],
+            d0.ships_arriving, d0.metal_arriving, d0.attacking_player_id,
+        );
 
         let updated: PlanetDynamic = Pack::new([ships, metal, o_exists, o_id]);
 

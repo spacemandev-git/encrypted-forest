@@ -201,7 +201,7 @@ export function applyCometBoosts(
 ): CelestialBodyStats {
   const result = { ...stats };
   for (const comet of comets) {
-    if (comet === 0) continue; // 0 = no comet
+    if ((comet as number) === 0) continue; // 0 = no comet
     switch (comet) {
       case CometBoost.ShipCapacity:   // 1
         result.maxShipCapacity *= 2;

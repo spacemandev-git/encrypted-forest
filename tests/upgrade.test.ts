@@ -2,15 +2,10 @@
  * Upgrade integration tests.
  *
  * Tests:
- * 1. Upgrade cost computation (client-side unit test)
- * 2. Upgrade stat changes for Range focus (unit test)
- * 3. Upgrade stat changes for LaunchVelocity focus (unit test)
- * 4. queue_upgrade_planet flow (requires Arcium)
- * 5. Verify encrypted state changes after upgrade
+ * 1. queue_upgrade_planet flow (requires Arcium)
+ * 2. Verify encrypted state changes after upgrade
  *
- * NOTE: Upgrades go through MPC via queue_upgrade_planet. The MPC circuit
- * validates: player owns the planet, planet is a Planet type, has enough metal,
- * then doubles caps/gen and applies focus bonus.
+ * REQUIRES: Surfpool + Arcium ARX nodes running
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -36,73 +31,6 @@ import {
   UpgradeFocus,
   EncryptionContext,
 } from "./helpers";
-
-// ---------------------------------------------------------------------------
-// Upgrade Cost Computation (pure unit tests)
-// ---------------------------------------------------------------------------
-
-describe("Upgrade Cost Computation", () => {
-  it("computes correct upgrade costs", () => {
-    // cost = 100 * 2^level
-    expect(upgradeCost(1)).toBe(200n);   // level 1 -> 200 metal
-    expect(upgradeCost(2)).toBe(400n);   // level 2 -> 400 metal
-    expect(upgradeCost(3)).toBe(800n);   // level 3 -> 800 metal
-    expect(upgradeCost(4)).toBe(1600n);
-    expect(upgradeCost(5)).toBe(3200n);
-  });
-});
-
-describe("Upgrade Stat Changes (Unit Tests)", () => {
-  it("verifies Range focus upgrade doubles caps + gen + range", () => {
-    const beforeStats = {
-      maxShipCapacity: 100,
-      maxMetalCapacity: 0,
-      shipGenSpeed: 1,
-      range: 4,
-      launchVelocity: 2,
-      level: 1,
-    };
-
-    const afterRange = {
-      maxShipCapacity: beforeStats.maxShipCapacity * 2,
-      maxMetalCapacity: beforeStats.maxMetalCapacity * 2,
-      shipGenSpeed: beforeStats.shipGenSpeed * 2,
-      range: beforeStats.range * 2,              // doubled
-      launchVelocity: beforeStats.launchVelocity, // unchanged
-      level: beforeStats.level + 1,
-    };
-
-    expect(afterRange.maxShipCapacity).toBe(200);
-    expect(afterRange.shipGenSpeed).toBe(2);
-    expect(afterRange.range).toBe(8);
-    expect(afterRange.launchVelocity).toBe(2);
-    expect(afterRange.level).toBe(2);
-  });
-
-  it("verifies LaunchVelocity focus upgrade doubles caps + gen + velocity", () => {
-    const beforeStats = {
-      maxShipCapacity: 100,
-      maxMetalCapacity: 0,
-      shipGenSpeed: 1,
-      range: 4,
-      launchVelocity: 2,
-      level: 1,
-    };
-
-    const afterVelocity = {
-      maxShipCapacity: beforeStats.maxShipCapacity * 2,
-      maxMetalCapacity: beforeStats.maxMetalCapacity * 2,
-      shipGenSpeed: beforeStats.shipGenSpeed * 2,
-      range: beforeStats.range,                         // unchanged
-      launchVelocity: beforeStats.launchVelocity * 2,   // doubled
-      level: beforeStats.level + 1,
-    };
-
-    expect(afterVelocity.range).toBe(4);
-    expect(afterVelocity.launchVelocity).toBe(4);
-    expect(afterVelocity.level).toBe(2);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Queue Upgrade Planet (MPC)

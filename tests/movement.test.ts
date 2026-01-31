@@ -2,17 +2,10 @@
  * Ship movement integration tests.
  *
  * Tests:
- * 1. Distance computation (client-side unit tests)
- * 2. Distance decay computation
- * 3. Landing slot computation
- * 4. Ship generation computation
- * 5. queue_process_move flow (requires Arcium)
- * 6. Pending moves creation and flush
+ * 1. queue_process_move flow (requires Arcium)
+ * 2. Pending moves creation and flush
  *
- * NOTE: All movement now goes through MPC via queue_process_move.
- * The MPC circuit validates ownership, deducts ships from source,
- * computes landing slot, and returns encrypted move data.
- * The callback writes the move to target's pending moves.
+ * REQUIRES: Surfpool + Arcium ARX nodes running
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -34,7 +27,6 @@ import {
   queueFlushPlanet,
   computePlanetHash,
   computeDistance,
-  applyDistanceDecay,
   computeLandingSlot,
   derivePlanetPDA,
   derivePendingMovesPDA,
@@ -51,113 +43,6 @@ import {
   DEFAULT_GAME_SPEED,
   EncryptionContext,
 } from "./helpers";
-
-// ---------------------------------------------------------------------------
-// Movement Helper Functions (pure unit tests, no chain needed)
-// ---------------------------------------------------------------------------
-
-describe("Movement Helper Functions", () => {
-  it("computes distance correctly", () => {
-    // max(dx, dy) + min(dx, dy) / 2
-    // (0,0) -> (3,4): max(3,4) + min(3,4)/2 = 4 + 1 = 5
-    expect(computeDistance(0n, 0n, 3n, 4n)).toBe(5n);
-
-    // (0,0) -> (10,0): max(10,0) + 0 = 10
-    expect(computeDistance(0n, 0n, 10n, 0n)).toBe(10n);
-
-    // (0,0) -> (0,10): max(0,10) + 0 = 10
-    expect(computeDistance(0n, 0n, 0n, 10n)).toBe(10n);
-
-    // negative coordinates
-    expect(computeDistance(-5n, -5n, 5n, 5n)).toBe(15n); // max(10,10) + 10/2 = 15
-
-    // same point
-    expect(computeDistance(3n, 7n, 3n, 7n)).toBe(0n);
-  });
-
-  it("applies distance decay correctly", () => {
-    // 10 ships, distance 6, range 3 -> lost = 6/3 = 2 -> 8 survive
-    expect(applyDistanceDecay(10n, 6n, 3n)).toBe(8n);
-
-    // 5 ships, distance 20, range 3 -> lost = 6 -> max(0, 5-6) = 0
-    expect(applyDistanceDecay(5n, 20n, 3n)).toBe(0n);
-
-    // No distance = no decay
-    expect(applyDistanceDecay(10n, 0n, 3n)).toBe(10n);
-
-    // Range 0 = all ships lost
-    expect(applyDistanceDecay(10n, 5n, 0n)).toBe(0n);
-  });
-
-  it("computes landing slot correctly", () => {
-    // current=100, distance=10, velocity=5, speed=10000
-    // travel_time = 10 * 10000 / (5 * 10000) = 2
-    // landing = 100 + 2 = 102
-    expect(computeLandingSlot(100n, 10n, 5n, 10000n)).toBe(102n);
-
-    // Zero velocity = max
-    expect(computeLandingSlot(100n, 10n, 0n, 10000n)).toBe(
-      BigInt(Number.MAX_SAFE_INTEGER)
-    );
-
-    // Same spot (distance 0) = instant
-    expect(computeLandingSlot(100n, 0n, 5n, 10000n)).toBe(100n);
-  });
-
-  it("verifies reinforcement logic (unit test)", () => {
-    const planetShips = 50n;
-    const maxCapacity = 100n;
-    const reinforcement = 30n;
-    const result = planetShips + reinforcement;
-    const capped = result > maxCapacity ? maxCapacity : result;
-    expect(capped).toBe(80n);
-  });
-
-  it("verifies combat: attacker wins (unit test)", () => {
-    const attackerShips = 100n;
-    const defenderShips = 60n;
-    const remaining = attackerShips - defenderShips;
-    expect(remaining).toBe(40n);
-  });
-
-  it("verifies combat: defender wins tie (unit test)", () => {
-    const attackerShips = 50n;
-    const defenderShips = 50n;
-    const defenderRemaining = defenderShips - attackerShips;
-    expect(defenderRemaining).toBe(0n);
-    // Defender still owns with 0 ships
-  });
-
-  it("verifies combat: defender wins with surplus (unit test)", () => {
-    const attackerShips = 30n;
-    const defenderShips = 80n;
-    const defenderRemaining = defenderShips - attackerShips;
-    expect(defenderRemaining).toBe(50n);
-  });
-
-  it("verifies ship generation computation (unit test)", () => {
-    const lastCount = 10n;
-    const maxCap = 100n;
-    const genSpeed = 2n;
-    const lastSlot = 1000n;
-    const gameSpeed = 10000n;
-
-    // 1000 slots elapsed: generated = 2 * 1000 * 10000 / 10000 = 2000
-    // total = 10 + 2000 = 2010, capped at 100
-    const currentSlot1 = 2000n;
-    const elapsed1 = currentSlot1 - lastSlot;
-    const generated1 = (genSpeed * elapsed1 * 10000n) / gameSpeed;
-    const result1 = (lastCount + generated1) > maxCap ? maxCap : (lastCount + generated1);
-    expect(result1).toBe(100n);
-
-    // 5 slots elapsed: generated = 2 * 5 * 10000 / 10000 = 10
-    const currentSlot2 = 1005n;
-    const elapsed2 = currentSlot2 - lastSlot;
-    const generated2 = (genSpeed * elapsed2 * 10000n) / gameSpeed;
-    const result2 = (lastCount + generated2) > maxCap ? maxCap : (lastCount + generated2);
-    expect(result2).toBe(20n);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Queue Process Move (MPC)
