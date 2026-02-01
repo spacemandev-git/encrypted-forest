@@ -14,6 +14,7 @@ interface HUDProps {
   totalMetal: Accessor<bigint>;
   exploredCount: Accessor<number>;
   hasSpawned: Accessor<boolean>;
+  onCenterSpawn?: () => void;
 }
 
 export default function HUD(props: HUDProps) {
@@ -62,6 +63,22 @@ export default function HUD(props: HUDProps) {
           <span class={tui.label}>METAL </span>
           <span class={tui.value}>{props.totalMetal().toString()}</span>
         </span>
+      </Show>
+      <Show when={props.onCenterSpawn}>
+        <span class={tui.dim}>|</span>
+        <button
+          class={tui.button}
+          onClick={() => props.onCenterSpawn?.()}
+          style={{
+            padding: "1px 8px",
+            "font-size": "10px",
+            color: "#88ffbb",
+            "border-color": "#444444",
+            cursor: "pointer",
+          }}
+        >
+          SPAWN
+        </button>
       </Show>
       <span style={{ "margin-left": "auto" }}>
         <span class={tui.label}>EXPLORED </span>

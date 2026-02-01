@@ -1,12 +1,21 @@
 /**
  * Hash Miner — orchestrates multiple Web Workers to scan coordinates
  * in configurable patterns with adjustable chunk size and worker count.
+ *
+ * Persists explored coordinates and discoveries to IndexedDB so map
+ * state survives page refreshes.
  */
 
 import { createSignal, type Accessor } from "solid-js";
 import type { NoiseThresholds } from "@encrypted-forest/core";
 import type { MineRequest, MineResult } from "./worker.js";
 import { getPatternGenerator, type ScanPattern } from "./patterns.js";
+import {
+  loadMinerData,
+  saveMinerData,
+  type SerializedDiscovery,
+  type PersistedMinerData,
+} from "./persistence.js";
 
 export interface MinerConfig {
   /** Number of Web Workers (simulates "cores") */
@@ -46,6 +55,12 @@ export interface MinerStats {
 export interface MinerAPI {
   stats: Accessor<MinerStats>;
   discoveries: Accessor<DiscoveredBody[]>;
+  /** All coordinates that have been scanned (including empty space). Keys: "x,y" */
+  exploredCoords: ReadonlySet<string>;
+  /** Mark a coordinate as explored (e.g. spawn planet) */
+  addExploredCoord: (x: number, y: number) => void;
+  /** Load persisted map data for a game+wallet scope */
+  loadScope: (scopeKey: string) => Promise<void>;
   start: (gameId: bigint, thresholds: NoiseThresholds, hashRounds: number) => void;
   stop: () => void;
   updateConfig: (partial: Partial<MinerConfig>) => void;
@@ -60,6 +75,31 @@ const DEFAULT_CONFIG: MinerConfig = {
   centerY: 0,
   maxRadius: 500,
 };
+
+/** How often to flush to IndexedDB while mining (ms) */
+const PERSIST_INTERVAL = 3000;
+
+function serializeDiscovery(d: DiscoveredBody): SerializedDiscovery {
+  return {
+    x: d.x.toString(),
+    y: d.y.toString(),
+    hash: Array.from(d.hash),
+    bodyType: d.bodyType,
+    size: d.size,
+    comets: d.comets,
+  };
+}
+
+function deserializeDiscovery(s: SerializedDiscovery): DiscoveredBody {
+  return {
+    x: BigInt(s.x),
+    y: BigInt(s.y),
+    hash: new Uint8Array(s.hash),
+    bodyType: s.bodyType,
+    size: s.size,
+    comets: s.comets,
+  };
+}
 
 export function createMiner(): MinerAPI {
   const [config, setConfig] = createSignal<MinerConfig>({ ...DEFAULT_CONFIG });
@@ -83,10 +123,76 @@ export function createMiner(): MinerAPI {
   let allDiscoveries: DiscoveredBody[] = [];
   let patternGen: Generator<[number, number]> | null = null;
   let statsInterval: ReturnType<typeof setInterval> | null = null;
+  let persistInterval: ReturnType<typeof setInterval> | null = null;
   let pendingChunks = 0;
+  let currentScopeKey: string | null = null;
+  let dirty = false;
 
   // Track which coords have been hashed across miner sessions
   const hashedCoords = new Set<string>();
+
+  // -------------------------------------------------------------------------
+  // Persistence helpers
+  // -------------------------------------------------------------------------
+
+  async function flushToDB(): Promise<void> {
+    if (!currentScopeKey || !dirty) return;
+    dirty = false;
+    const data: PersistedMinerData = {
+      scopeKey: currentScopeKey,
+      exploredCoords: Array.from(hashedCoords),
+      discoveries: allDiscoveries.map(serializeDiscovery),
+      updatedAt: Date.now(),
+    };
+    await saveMinerData(data).catch((err) => {
+      console.warn("Failed to persist miner data:", err);
+    });
+  }
+
+  async function loadScope(scopeKey: string): Promise<void> {
+    // Flush any previous scope data first
+    if (currentScopeKey && currentScopeKey !== scopeKey) {
+      await flushToDB();
+    }
+
+    // Clear in-memory state
+    hashedCoords.clear();
+    allDiscoveries = [];
+    totalHashed = 0;
+    totalDiscovered = 0;
+    dirty = false;
+
+    currentScopeKey = scopeKey;
+
+    // Load from IndexedDB
+    const persisted = await loadMinerData(scopeKey);
+    if (persisted) {
+      for (const coord of persisted.exploredCoords) {
+        hashedCoords.add(coord);
+      }
+      allDiscoveries = persisted.discoveries.map(deserializeDiscovery);
+      totalHashed = hashedCoords.size;
+      totalDiscovered = allDiscoveries.length;
+    }
+
+    // Update reactive signals with loaded data
+    setDiscoveries([...allDiscoveries]);
+    const cfg = config();
+    setStats({
+      totalHashed,
+      totalDiscovered,
+      hashesPerSecond: 0,
+      elapsed: 0,
+      running: false,
+      pattern: cfg.pattern,
+      workerCount: cfg.workerCount,
+      chunkSize: cfg.chunkSize,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker management
+  // -------------------------------------------------------------------------
 
   function spawnWorkers(count: number): Worker[] {
     const ws: Worker[] = [];
@@ -144,11 +250,10 @@ export function createMiner(): MinerAPI {
     const cfg = config();
     running = true;
     startTime = performance.now();
-    totalHashed = 0;
-    totalDiscovered = 0;
-    allDiscoveries = [];
     pendingChunks = 0;
-    setDiscoveries([]);
+
+    // Keep existing persisted data — only reset per-session rate counters
+    const sessionStartHashed = totalHashed;
 
     patternGen = getPatternGenerator(cfg.pattern, cfg.centerX, cfg.centerY, cfg.maxRadius);
     workers = spawnWorkers(cfg.workerCount);
@@ -161,6 +266,7 @@ export function createMiner(): MinerAPI {
         pendingChunks--;
         totalHashed += e.data.hashed;
         totalDiscovered += e.data.discovered.length;
+        dirty = true;
 
         for (const d of e.data.discovered) {
           allDiscoveries.push({
@@ -196,7 +302,8 @@ export function createMiner(): MinerAPI {
     // Stats update interval
     statsInterval = setInterval(() => {
       const elapsed = (performance.now() - startTime) / 1000;
-      const hps = elapsed > 0 ? totalHashed / elapsed : 0;
+      const sessionHashed = totalHashed - sessionStartHashed;
+      const hps = elapsed > 0 ? sessionHashed / elapsed : 0;
       const cfg = config();
       setStats({
         totalHashed,
@@ -209,6 +316,11 @@ export function createMiner(): MinerAPI {
         chunkSize: cfg.chunkSize,
       });
     }, 250);
+
+    // Periodic persistence flush
+    persistInterval = setInterval(() => {
+      flushToDB();
+    }, PERSIST_INTERVAL);
   }
 
   function stop(): void {
@@ -222,6 +334,10 @@ export function createMiner(): MinerAPI {
     if (statsInterval) {
       clearInterval(statsInterval);
       statsInterval = null;
+    }
+    if (persistInterval) {
+      clearInterval(persistInterval);
+      persistInterval = null;
     }
 
     // Final stats update
@@ -238,6 +354,14 @@ export function createMiner(): MinerAPI {
       workerCount: cfg.workerCount,
       chunkSize: cfg.chunkSize,
     });
+
+    // Flush to DB on stop
+    flushToDB();
+  }
+
+  function addExploredCoord(x: number, y: number): void {
+    hashedCoords.add(`${x},${y}`);
+    dirty = true;
   }
 
   function updateConfig(partial: Partial<MinerConfig>): void {
@@ -247,6 +371,9 @@ export function createMiner(): MinerAPI {
   return {
     stats,
     discoveries,
+    exploredCoords: hashedCoords as ReadonlySet<string>,
+    addExploredCoord,
+    loadScope,
     start,
     stop,
     updateConfig,

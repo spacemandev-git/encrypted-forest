@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@arcium-hq/client": "0.6.5",
     "@coral-xyz/anchor": "^0.32.1",
     "@encrypted-forest/core": "workspace:*",
     "@encrypted-forest/solidjs-sdk": "workspace:*",
@@ -18,12 +19,14 @@
     "@signaldb/indexeddb": "^1.1.0",
     "@signaldb/solid": "^1.0.0",
     "@solana/web3.js": "^1.98.0",
+    "buffer": "^6.0.3",
     "idb": "^8.0.1",
     "solid-js": "^1.9.0"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
     "vite": "^6.0.0",
+    "vite-plugin-node-polyfills": "^0.22.0",
     "vite-plugin-solid": "^2.11.0"
   },
   "license": "MIT"

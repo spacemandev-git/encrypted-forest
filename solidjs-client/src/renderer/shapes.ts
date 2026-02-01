@@ -124,33 +124,34 @@ export function denseSphereWireframe(scale: number = 1): ShapeData {
   return sphereWireframe(scale, 8, 12);
 }
 
-/** Star-burst wireframe for quasars */
-export function starBurst(scale: number = 1, spikes: number = 8): ShapeData {
-  const vertices: [number, number, number][] = [[0, 0, 0]]; // center
+/** Double-diamond wireframe for quasars (elongated octahedron with equatorial ring) */
+export function quasarDiamond(scale: number = 1): ShapeData {
+  const s = scale;
+  const h = s * 1.4; // elongated poles
+  const r = s * 0.7; // equatorial radius
+  const ringCount = 6;
+
+  const vertices: [number, number, number][] = [
+    [0, h, 0],   // top pole
+    [0, -h, 0],  // bottom pole
+  ];
   const edges: [number, number][] = [];
 
-  for (let i = 0; i < spikes; i++) {
-    const theta = (Math.PI * 2 * i) / spikes;
-    const phi = Math.PI * 0.4 + Math.random() * 0.4;
-    vertices.push([
-      scale * 1.5 * Math.sin(phi) * Math.cos(theta),
-      scale * 1.5 * Math.cos(phi),
-      scale * 1.5 * Math.sin(phi) * Math.sin(theta),
-    ]);
-    // Connect center to spike
-    edges.push([0, vertices.length - 1]);
-    // Add inner ring vertex
-    vertices.push([
-      scale * 0.4 * Math.sin(phi) * Math.cos(theta + 0.3),
-      scale * 0.4 * Math.cos(phi),
-      scale * 0.4 * Math.sin(phi) * Math.sin(theta + 0.3),
-    ]);
-    edges.push([0, vertices.length - 1]);
+  // Equatorial ring vertices
+  for (let i = 0; i < ringCount; i++) {
+    const theta = (Math.PI * 2 * i) / ringCount;
+    vertices.push([r * Math.cos(theta), 0, r * Math.sin(theta)]);
   }
 
-  // Connect spikes in a ring
-  for (let i = 0; i < spikes; i++) {
-    edges.push([1 + i * 2, 1 + ((i + 1) % spikes) * 2]);
+  // Connect poles to ring
+  for (let i = 0; i < ringCount; i++) {
+    edges.push([0, 2 + i]); // top to ring
+    edges.push([1, 2 + i]); // bottom to ring
+  }
+
+  // Connect ring
+  for (let i = 0; i < ringCount; i++) {
+    edges.push([2 + i, 2 + ((i + 1) % ringCount)]);
   }
 
   return { vertices, edges };
@@ -240,39 +241,28 @@ export function asteroidRing(scale: number = 1, count: number = 8): ShapeData {
   return { vertices, edges };
 }
 
-/** Get shape data based on body type and size */
+/** Get shape data based on body type and size.
+ *  All regular planets use the same octahedron shape — size only affects scale.
+ *  Special body types (quasar, spacetime rip, asteroid belt) get unique shapes.
+ */
 export function getShapeForPlanet(
   bodyType: number,
-  size: number,
+  _size: number,
   scale: number
 ): ShapeData {
   // Body type: 0=Planet, 1=Quasar, 2=SpacetimeRip, 3=AsteroidBelt
   switch (bodyType) {
-    case 1: return starBurst(scale);
+    case 1: return quasarDiamond(scale);
     case 2: return torus(scale);
     case 3: return asteroidRing(scale);
-    default: // Planet - size determines shape
-      switch (size) {
-        case 1: return tetrahedron(scale);
-        case 2: return cube(scale);
-        case 3: return octahedron(scale);
-        case 4: return icosahedron(scale);
-        case 5: return sphereWireframe(scale);
-        case 6: return denseSphereWireframe(scale);
-        default: return octahedron(scale);
-      }
+    default: return denseSphereWireframe(scale);
   }
 }
 
-/** Get pixel radius for a given size */
+/** Get pixel radius for a given size.
+ *  Exponential scaling from 1.5 cells (size 1) to 16 cells (size 6).
+ *  radius = 9 * (96/9)^((size-1)/5)
+ */
 export function sizeToRadius(size: number): number {
-  switch (size) {
-    case 1: return 8;
-    case 2: return 14;
-    case 3: return 22;
-    case 4: return 32;
-    case 5: return 44;
-    case 6: return 60;
-    default: return 16;
-  }
+  return Math.round(9 * Math.pow(96 / 9, (size - 1) / 5));
 }

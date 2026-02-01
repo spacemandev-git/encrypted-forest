@@ -55,7 +55,7 @@ export function zoomCamera(
 ): void {
   const [wx, wy] = screenToWorld(cam, screenX, screenY, canvasW, canvasH);
   cam.zoom *= factor;
-  cam.zoom = Math.max(0.2, Math.min(5, cam.zoom));
+  cam.zoom = Math.max(0.01, Math.min(10, cam.zoom));
   // Adjust position so the zoom is centered on the cursor
   cam.x = wx - (screenX - canvasW / 2) / cam.zoom;
   cam.y = wy - (screenY - canvasH / 2) / cam.zoom;

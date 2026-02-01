@@ -1,5 +1,8 @@
 /**
  * Mouse/keyboard handler for canvas interaction.
+ *
+ * IMPORTANT: Mouse events report CSS pixels (clientX/Y) but canvas.width/height
+ * are DPR-scaled. All screen ↔ world conversions must use CSS dimensions.
  */
 
 import { panCamera, zoomCamera, screenToWorld, type Camera } from "./camera.js";
@@ -36,7 +39,14 @@ export function attachInputHandlers(
   camera: Camera,
   input: InputState
 ): () => void {
+  /** CSS pixel dimensions (not DPR-scaled) */
+  function cssW() { return window.innerWidth; }
+  function cssH() { return window.innerHeight; }
+
   function onKeyDown(e: KeyboardEvent) {
+    // Don't capture keys when typing in an input/textarea
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
     input.keys.add(e.key.toLowerCase());
   }
 
@@ -62,8 +72,8 @@ export function attachInputHandlers(
           camera,
           e.clientX,
           e.clientY,
-          canvas.width,
-          canvas.height
+          cssW(),
+          cssH()
         );
         input.onClick(wx, wy);
       }
@@ -85,8 +95,8 @@ export function attachInputHandlers(
       camera,
       e.clientX,
       e.clientY,
-      canvas.width,
-      canvas.height
+      cssW(),
+      cssH()
     );
     input.hoveredCell = {
       x: Math.round(wx / CELL_WIDTH),
@@ -97,7 +107,7 @@ export function attachInputHandlers(
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const factor = e.deltaY > 0 ? 0.9 : 1.1;
-    zoomCamera(camera, factor, e.clientX, e.clientY, canvas.width, canvas.height);
+    zoomCamera(camera, factor, e.clientX, e.clientY, cssW(), cssH());
   }
 
   canvas.addEventListener("mousedown", onMouseDown);

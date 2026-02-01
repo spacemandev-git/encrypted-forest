@@ -64,16 +64,17 @@ export interface Game {
  * Default noise thresholds for testing/development.
  */
 export const DEFAULT_THRESHOLDS: NoiseThresholds = {
-  deadSpaceThreshold: 128,
+  deadSpaceThreshold: 253,     // ~1% of coords have a body (was 50%)
   planetThreshold: 128,
   quasarThreshold: 192,
   spacetimeRipThreshold: 224,
   asteroidBeltThreshold: 255,
-  sizeThreshold1: 43,
-  sizeThreshold2: 86,
-  sizeThreshold3: 128,
-  sizeThreshold4: 171,
-  sizeThreshold5: 214,
+  // Exponential rarity: size 1 ~50%, size 2 ~25%, size 3 ~12%, size 4 ~6%, size 5 ~4%, size 6 ~3%
+  sizeThreshold1: 128,
+  sizeThreshold2: 192,
+  sizeThreshold3: 224,
+  sizeThreshold4: 240,
+  sizeThreshold5: 250,
 };
 
 export const DEFAULT_HASH_ROUNDS = 100;

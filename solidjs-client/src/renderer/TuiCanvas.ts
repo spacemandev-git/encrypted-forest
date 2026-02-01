@@ -77,6 +77,13 @@ export class TuiCanvas {
     return this.input.hoveredCell;
   }
 
+  /** Center the camera on a grid cell and zoom to max */
+  centerOn(gridX: number, gridY: number): void {
+    this.camera.x = gridX * CELL_WIDTH;
+    this.camera.y = gridY * CELL_HEIGHT;
+    this.camera.zoom = 10;
+  }
+
   private handleResize = () => {
     this.resize();
   };
@@ -115,8 +122,14 @@ export class TuiCanvas {
     const selectedHash = this.opts.getSelectedHash();
     const time = (performance.now() - this.startTime) / 1000;
 
+    // Build set of planet coordinates for grid dot rendering
+    const planetCoords = new Set<string>();
+    for (const entry of planets.values()) {
+      planetCoords.add(`${entry.discovery.x},${entry.discovery.y}`);
+    }
+
     // Render layers
-    renderGrid(this.ctx, this.camera, w, h, exploredCoords, mapDiameter);
+    renderGrid(this.ctx, this.camera, w, h, exploredCoords, mapDiameter, planetCoords);
     renderPlanets(
       this.ctx,
       this.camera,

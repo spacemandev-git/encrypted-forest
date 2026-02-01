@@ -61,19 +61,14 @@ export function drawWireframe(
 ): void {
   const { shape, screenX, screenY, angle, tilt, depth, color, alpha } = params;
 
-  // Transform vertices: rotate → tilt → translate into depth
+  // Transform vertices: rotate → tilt → orthographic projection (no depth scaling)
   const projected: [number, number][] = shape.vertices.map((v) => {
     let transformed = rotateY(v, angle);
     transformed = rotateX(transformed, tilt);
-    transformed = translateZ(transformed, depth);
-    return project3D(
-      transformed[0],
-      transformed[1],
-      transformed[2],
-      screenX,
-      screenY,
-      300
-    );
+    return [
+      screenX + transformed[0],
+      screenY - transformed[1],
+    ];
   });
 
   ctx.save();

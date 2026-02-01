@@ -8,12 +8,42 @@
 import { createSignal, createMemo, type Accessor } from "solid-js";
 import { Connection, PublicKey, Keypair, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import { Program, AnchorProvider } from "@coral-xyz/anchor";
-import type { Game, NoiseThresholds, CreateGameArgs } from "@encrypted-forest/core";
-import { DEFAULT_THRESHOLDS, DEFAULT_HASH_ROUNDS, deriveGamePDA, PROGRAM_ID, idlJson, buildCreateGameIx } from "@encrypted-forest/core";
+import type { Game, NoiseThresholds, CreateGameArgs, ScannedCoordinate } from "@encrypted-forest/core";
+import {
+  DEFAULT_THRESHOLDS,
+  DEFAULT_HASH_ROUNDS,
+  deriveGamePDA,
+  PROGRAM_ID,
+  idlJson,
+  buildCreateGameIx,
+  buildInitPlayerIx,
+  buildQueueInitSpawnPlanetIx,
+  findSpawnPlanet,
+  computePlanetHash,
+} from "@encrypted-forest/core";
+import { saveRecentGame } from "./history.js";
+import {
+  setupEncryption,
+  getArciumAccountAddresses,
+  generateNonce,
+  generateComputationOffset,
+  encryptAndPack,
+  buildInitSpawnPlanetValues,
+  x25519,
+} from "./arcium.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+export interface SpawnLocation {
+  x: bigint;
+  y: bigint;
+  hash: Uint8Array;
+  bodyType: number;
+  size: number;
+  comets: number[];
+}
 
 export interface GameSessionAPI {
   /** Current game ID (null if no game selected) */
@@ -32,10 +62,12 @@ export interface GameSessionAPI {
   error: Accessor<string | null>;
   /** Scope key for IndexedDB (gameId:walletPubkey) */
   scopeKey: Accessor<string | null>;
+  /** Spawn location found after create/join (if any) */
+  spawnLocation: Accessor<SpawnLocation | null>;
 
-  /** Join an existing game by ID — fetches the Game account from chain */
-  joinGame: (gameId: bigint, rpcUrl: string, walletPubkey: string) => Promise<void>;
-  /** Create a new game on-chain and enter it */
+  /** Join an existing game by ID — fetches the Game account, inits player, finds spawn */
+  joinGame: (gameId: bigint, rpcUrl: string, walletPubkey: string, keypair?: Keypair) => Promise<void>;
+  /** Create a new game on-chain, init player, find spawn, and enter */
   createGame: (args: CreateGameArgs, rpcUrl: string, keypair: Keypair) => Promise<void>;
   /** Leave the current game session */
   leaveGame: () => void;
@@ -79,6 +111,64 @@ function convertGameRaw(raw: any): Game {
 }
 
 // ---------------------------------------------------------------------------
+// Arcium spawn planet helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Queue initSpawnPlanet MPC computation on-chain.
+ * Fire-and-forget — logs warning on failure but doesn't throw.
+ */
+async function queueSpawnPlanet(
+  program: Program,
+  connection: Connection,
+  keypair: Keypair,
+  gameId: bigint,
+  x: bigint,
+  y: bigint,
+  hashRounds: number
+): Promise<void> {
+  try {
+    const encCtx = await setupEncryption(connection, program.programId);
+
+    const planetHash = computePlanetHash(x, y, gameId, hashRounds);
+    const { nonce, nonceValue } = generateNonce();
+    const values = buildInitSpawnPlanetValues(x, y, 0n, 0n);
+    const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
+
+    const computationOffset = generateComputationOffset();
+    const arciumAccts = getArciumAccountAddresses(
+      program.programId,
+      computationOffset,
+      "init_spawn_planet"
+    );
+
+    const observerKey = x25519.utils.randomSecretKey();
+    const observerPubkey = x25519.getPublicKey(observerKey);
+
+    await buildQueueInitSpawnPlanetIx(
+      program,
+      keypair.publicKey,
+      {
+        gameId,
+        computationOffset: BigInt(computationOffset.toString()),
+        planetHash,
+        ciphertexts: packed,
+        pubkey: encCtx.publicKey,
+        nonce: nonceValue,
+        observerPubkey,
+      },
+      arciumAccts
+    )
+      .signers([keypair])
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+    console.log("initSpawnPlanet queued successfully for", x.toString(), y.toString());
+  } catch (e: any) {
+    console.warn("initSpawnPlanet queue failed (non-blocking):", e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Store factory
 // ---------------------------------------------------------------------------
 
@@ -88,6 +178,7 @@ export function createGameSession(): GameSessionAPI {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [walletPubkey, setWalletPubkeySignal] = createSignal<string | null>(null);
+  const [spawnLocation, setSpawnLocation] = createSignal<SpawnLocation | null>(null);
 
   const thresholds = createMemo<NoiseThresholds>(() => {
     return game()?.noiseThresholds ?? DEFAULT_THRESHOLDS;
@@ -109,29 +200,81 @@ export function createGameSession(): GameSessionAPI {
     return `${gid.toString()}:${wp}`;
   });
 
-  async function joinGame(gid: bigint, rpcUrl: string, walletPk: string): Promise<void> {
+  async function joinGame(gid: bigint, rpcUrl: string, walletPk: string, keypair?: Keypair): Promise<void> {
     setLoading(true);
     setError(null);
 
     try {
       const connection = new Connection(rpcUrl, "confirmed");
 
-      // Create a read-only Anchor provider (no signing needed for fetch)
-      const provider = new AnchorProvider(
+      // Create a read-only provider for fetching
+      const readProvider = new AnchorProvider(
         connection,
-        // Dummy wallet — we only need to read, not sign
         { publicKey: PublicKey.default, signTransaction: async (t: any) => t, signAllTransactions: async (t: any) => t } as any,
         { commitment: "confirmed" }
       );
 
-      const program = new Program(idlJson as any, provider);
-      const [gamePDA] = deriveGamePDA(gid, program.programId);
-      const raw = await (program.account as any).game.fetch(gamePDA);
+      const readProgram = new Program(idlJson as any, readProvider);
+      const [gamePDA] = deriveGamePDA(gid, readProgram.programId);
+      const raw = await (readProgram.account as any).game.fetch(gamePDA);
       const gameData = convertGameRaw(raw);
+
+      // Build signing program if keypair is provided
+      let signingProgram: Program | null = null;
+      if (keypair) {
+        const signingProvider = new AnchorProvider(
+          connection,
+          {
+            publicKey: keypair.publicKey,
+            signTransaction: async (tx: any) => { tx.sign(keypair); return tx; },
+            signAllTransactions: async (txs: any[]) => { txs.forEach(tx => tx.sign(keypair)); return txs; },
+          } as any,
+          { commitment: "confirmed" }
+        );
+        signingProgram = new Program(idlJson as any, signingProvider);
+
+        // Init player
+        try {
+          await buildInitPlayerIx(signingProgram, keypair.publicKey, gid).rpc();
+        } catch (e: any) {
+          // Player may already exist — ignore "already in use" errors
+          if (!e.message?.includes("already in use")) {
+            console.warn("initPlayer failed (may already exist):", e.message);
+          }
+        }
+      }
+
+      // Find a spawn planet
+      const spawn = findSpawnPlanet(
+        gid,
+        gameData.noiseThresholds,
+        Number(gameData.mapDiameter),
+        100_000,
+        gameData.hashRounds
+      );
+      setSpawnLocation({
+        x: spawn.x,
+        y: spawn.y,
+        hash: spawn.hash,
+        bodyType: spawn.properties!.bodyType,
+        size: spawn.properties!.size,
+        comets: spawn.properties!.comets,
+      });
+
+      // Queue initSpawnPlanet if we have a keypair (fire-and-forget)
+      if (keypair && signingProgram) {
+        queueSpawnPlanet(
+          signingProgram, connection, keypair,
+          gid, spawn.x, spawn.y, gameData.hashRounds
+        ).catch(() => {});
+      }
 
       setGameId(gid);
       setGame(gameData);
       setWalletPubkeySignal(walletPk);
+
+      // Persist to game history
+      saveRecentGame(gid, walletPk).catch(() => {});
     } catch (err: any) {
       setError(err.message ?? "Failed to fetch game account");
       throw err;
@@ -157,8 +300,35 @@ export function createGameSession(): GameSessionAPI {
       );
 
       const program = new Program(idlJson as any, provider);
-      const txBuilder = buildCreateGameIx(program, keypair.publicKey, args);
-      await txBuilder.rpc();
+
+      // 1. Create game on-chain
+      await buildCreateGameIx(program, keypair.publicKey, args).rpc();
+
+      // 2. Init player account for this wallet
+      await buildInitPlayerIx(program, keypair.publicKey, args.gameId).rpc();
+
+      // 3. Find a spawn planet near a random location
+      const spawn = findSpawnPlanet(
+        args.gameId,
+        args.noiseThresholds,
+        Number(args.mapDiameter),
+        100_000,
+        args.hashRounds
+      );
+      setSpawnLocation({
+        x: spawn.x,
+        y: spawn.y,
+        hash: spawn.hash,
+        bodyType: spawn.properties!.bodyType,
+        size: spawn.properties!.size,
+        comets: spawn.properties!.comets,
+      });
+
+      // 4. Queue initSpawnPlanet (fire-and-forget, don't block game entry)
+      queueSpawnPlanet(
+        program, connection, keypair,
+        args.gameId, spawn.x, spawn.y, args.hashRounds
+      ).catch(() => {});
 
       // Set session to the newly created game
       setGameId(args.gameId);
@@ -176,6 +346,9 @@ export function createGameSession(): GameSessionAPI {
         hashRounds: args.hashRounds,
       });
       setWalletPubkeySignal(keypair.publicKey.toBase58());
+
+      // Persist to game history
+      saveRecentGame(args.gameId, keypair.publicKey.toBase58()).catch(() => {});
     } catch (err: any) {
       setError(err.message ?? "Failed to create game");
       throw err;
@@ -189,6 +362,7 @@ export function createGameSession(): GameSessionAPI {
     setGame(null);
     setError(null);
     setWalletPubkeySignal(null);
+    setSpawnLocation(null);
   }
 
   function setWalletPubkey(pubkey: string): void {
@@ -204,6 +378,7 @@ export function createGameSession(): GameSessionAPI {
     loading,
     error,
     scopeKey,
+    spawnLocation,
     joinGame,
     createGame,
     leaveGame,

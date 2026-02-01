@@ -14,15 +14,14 @@ export const PALETTE = {
   border: "#333333",
   panelBg: "rgba(0, 0, 0, 0.95)",
   fog: "#000000",
-  explored: "#0a0a0a",
-  gridLine: "#1a1a1a",
-  gridDot: "#333333",
+  explored: "#0d0d14",
+  gridLine: "#222233",
+  gridDot: "#444466",
 } as const;
 
-/** Body type colors */
+/** Ownership colors — same for all body types */
 export const BODY_COLORS = {
-  planet: { neutral: "#9966ff", owned: "#cc88ff", enemy: "#ff4488" },
-  quasar: "#ddaaff",
-  spacetimeRip: "#ff3377",
-  asteroidBelt: "#ccaa55",
+  neutral: "#888899",   // grey — unowned
+  owned: "#4488ff",     // blue — owned by current wallet
+  enemy: "#ff4455",     // red — owned by another wallet
 } as const;

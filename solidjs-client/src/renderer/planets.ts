@@ -1,9 +1,18 @@
 /**
- * Planet rendering orchestrator — wireframe + labels on the grid.
+ * Planet rendering — adaptive detail based on zoom level.
+ *
+ * - Zoomed out (zoom < 0.5):  colored dots (1–3px)
+ * - Mid zoom  (0.5–2.0):     filled circles with body-type glyph
+ * - Zoomed in (zoom > 2.0):   rotating 3D wireframes
  */
 
 import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
-import { CELL_WIDTH, CELL_HEIGHT, font, SHIP_COUNT_FONT_SIZE, LABEL_FONT_SIZE } from "./font.js";
+import {
+  CELL_WIDTH,
+  CELL_HEIGHT,
+  font,
+  SHIP_COUNT_FONT_SIZE,
+} from "./font.js";
 import { PALETTE, BODY_COLORS } from "./palette.js";
 import { worldToScreen, type Camera } from "./camera.js";
 import { getShapeForPlanet, sizeToRadius } from "./shapes.js";
@@ -15,36 +24,34 @@ export interface PlanetRenderState {
   rotSpeed: number;
 }
 
-/** Get the wireframe color for a planet */
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function getPlanetColor(
   entry: PlanetEntry,
   playerId: bigint | null
 ): string {
-  const bodyType = entry.discovery.properties.bodyType;
-
-  switch (bodyType) {
-    case 1: return BODY_COLORS.quasar;
-    case 2: return BODY_COLORS.spacetimeRip;
-    case 3: return BODY_COLORS.asteroidBelt;
-    default: {
-      if (!entry.decrypted || entry.decrypted.dynamic.ownerExists === 0) {
-        return BODY_COLORS.planet.neutral;
-      }
-      if (playerId !== null && entry.decrypted.dynamic.ownerId === playerId) {
-        return BODY_COLORS.planet.owned;
-      }
-      return BODY_COLORS.planet.enemy;
-    }
+  if (!entry.decrypted || entry.decrypted.dynamic.ownerExists === 0) {
+    return BODY_COLORS.neutral;
   }
+  if (playerId !== null && entry.decrypted.dynamic.ownerId === playerId) {
+    return BODY_COLORS.owned;
+  }
+  return BODY_COLORS.enemy;
 }
 
-/** Get rotation speed seeded from hash */
 function getRotSpeed(hashHex: string): number {
   const seed = parseInt(hashHex.slice(0, 8), 16);
-  return 0.3 + (seed % 1000) / 1000 * 0.7;
+  return 0.3 + ((seed % 1000) / 1000) * 0.7;
 }
 
-/** Render all planets on the canvas */
+const BODY_GLYPHS = ["◆", "✦", "◎", "▣"];
+
+// ---------------------------------------------------------------------------
+// Main render
+// ---------------------------------------------------------------------------
+
 export function renderPlanets(
   ctx: CanvasRenderingContext2D,
   cam: Camera,
@@ -61,31 +68,29 @@ export function renderPlanets(
     const wy = Number(entry.discovery.y) * CELL_HEIGHT;
     const [sx, sy] = worldToScreen(cam, wx, wy, canvasW, canvasH);
 
-    // Skip if off-screen
-    if (sx < -100 || sx > canvasW + 100 || sy < -100 || sy > canvasH + 100) {
+    const size = entry.discovery.properties.size;
+    const screenRadius = sizeToRadius(size) * cam.zoom;
+    const color = getPlanetColor(entry, playerId);
+
+    // Smaller bodies require higher zoom to be visible
+    // Size 1 needs zoom >= 1.0, size 6 is always visible (zoom >= 0.1)
+    const minZoom = 1.1 - size * 0.17;
+    if (cam.zoom < minZoom) continue;
+
+    // Skip if off-screen (with margin for wireframes/labels)
+    const margin = screenRadius + 20;
+    if (sx < -margin || sx > canvasW + margin || sy < -margin || sy > canvasH + margin) {
       continue;
     }
 
-    const size = entry.discovery.properties.size;
-    const bodyType = entry.discovery.properties.bodyType;
-    const radius = sizeToRadius(size) * cam.zoom;
-    const color = getPlanetColor(entry, playerId);
-
-    // Get or create render state
+    // Wireframe rendering — scales with zoom to stay proportional to grid
     let state = planetStates.get(hashHex);
     if (!state) {
-      state = {
-        hashHex,
-        angle: 0,
-        rotSpeed: getRotSpeed(hashHex),
-      };
+      state = { hashHex, angle: 0, rotSpeed: getRotSpeed(hashHex) };
       planetStates.set(hashHex, state);
     }
+    state.angle += state.rotSpeed * 0.016;
 
-    // Update angle
-    state.angle += state.rotSpeed * 0.016; // ~60fps dt
-
-    // Pulse alpha for owned planets
     let alpha = 1;
     if (
       entry.decrypted &&
@@ -96,9 +101,7 @@ export function renderPlanets(
       alpha = 0.7 + 0.3 * Math.sin(time * 3);
     }
 
-    // Get shape and draw wireframe
-    const scale = radius * 0.7;
-    const shape = getShapeForPlanet(bodyType, size, scale);
+    const shape = getShapeForPlanet(entry.discovery.properties.bodyType, size, screenRadius);
 
     drawWireframe(ctx, {
       shape,
@@ -111,21 +114,21 @@ export function renderPlanets(
       alpha,
     });
 
-    // Selected highlight
+    // Selection ring
     if (hashHex === selectedHash) {
       ctx.save();
       ctx.strokeStyle = PALETTE.highlight;
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
-      ctx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      ctx.arc(sx, sy, screenRadius + 6, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.restore();
     }
 
-    // Ship count label below wireframe
-    if (entry.decrypted) {
+    // Ship count label (skip zero — synthetic/placeholder data)
+    if (entry.decrypted && screenRadius >= 8 && entry.decrypted.dynamic.shipCount > 0n) {
       const shipCount = entry.decrypted.dynamic.shipCount;
       ctx.save();
       ctx.font = font(SHIP_COUNT_FONT_SIZE * cam.zoom);
@@ -133,19 +136,7 @@ export function renderPlanets(
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.globalAlpha = 0.8;
-      ctx.fillText(`${shipCount}`, sx, sy + radius + 4);
-      ctx.restore();
-    }
-
-    // Planet type glyph at low zoom
-    if (cam.zoom < 0.8) {
-      const glyphs = ["O", "*", "~", "#"];
-      ctx.save();
-      ctx.font = font(LABEL_FONT_SIZE * cam.zoom, 600);
-      ctx.fillStyle = color;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(glyphs[bodyType] ?? "O", sx, sy);
+      ctx.fillText(`${shipCount}`, sx, sy + screenRadius + 4);
       ctx.restore();
     }
   }
