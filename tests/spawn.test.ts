@@ -84,8 +84,7 @@ describe("Queue Init Planet", () => {
     // Verify EncryptedCelestialBody account
     const body = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(body.planetHash).toEqual(Array.from(coord.hash));
-    expect(body.staticEncCiphertexts.length).toBe(4);
-    expect(body.dynamicEncCiphertexts.length).toBe(2);
+    expect(body.stateEncCiphertexts.length).toBe(3);
     expect(Number(body.lastUpdatedSlot)).toBeGreaterThan(0);
 
     // Verify PendingMovesMetadata account

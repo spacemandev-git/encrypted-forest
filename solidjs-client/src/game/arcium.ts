@@ -222,7 +222,12 @@ export function buildInitSpawnPlanetValues(
   playerId: bigint,
   sourcePlanetId: bigint
 ): bigint[] {
-  return [BigInt.asUintN(64, x), BigInt.asUintN(64, y), playerId, sourcePlanetId];
+  return [
+    BigInt.asUintN(64, x),
+    BigInt.asUintN(64, y),
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+  ];
 }
 
 // ---------------------------------------------------------------------------

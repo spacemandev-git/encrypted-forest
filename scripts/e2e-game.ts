@@ -27,6 +27,7 @@ import {
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
+import * as web3 from "@solana/web3.js";
 import { randomBytes } from "crypto";
 import { readFileSync } from "fs";
 
@@ -93,6 +94,225 @@ const scriptStart = Date.now();
 let stepCount = 0;
 let passCount = 0;
 let failCount = 0;
+
+let anchorSendCompatPatched = false;
+
+class ConfirmError extends Error {}
+
+function isVersionedTransaction(tx: any): boolean {
+  return typeof tx?.version !== "undefined";
+}
+
+async function sendAndConfirmRawTransactionCompat(
+  connection: Connection,
+  rawTransaction: Buffer,
+  options?: {
+    skipPreflight?: boolean;
+    preflightCommitment?: string;
+    commitment?: string;
+    maxRetries?: number;
+    minContextSlot?: number;
+    blockhash?: any;
+  }
+): Promise<string> {
+  const sendOptions = options
+    ? {
+        skipPreflight: options.skipPreflight,
+        preflightCommitment: options.preflightCommitment || options.commitment,
+        maxRetries: options.maxRetries,
+        minContextSlot: options.minContextSlot,
+      }
+    : {};
+  let status;
+  const startTime = Date.now();
+  while (Date.now() - startTime < 60000) {
+    try {
+      const signature = await connection.sendRawTransaction(
+        rawTransaction,
+        sendOptions
+      );
+      if (options?.blockhash) {
+        if (sendOptions.maxRetries === 0) {
+          const abortSignal = AbortSignal.timeout(15000);
+          status = (
+            await connection.confirmTransaction(
+              { abortSignal, signature, ...options.blockhash },
+              options && options.commitment
+            )
+          ).value;
+        } else {
+          status = (
+            await connection.confirmTransaction(
+              { signature, ...options.blockhash },
+              options && options.commitment
+            )
+          ).value;
+        }
+      } else {
+        status = (
+          await connection.confirmTransaction(
+            signature,
+            options && options.commitment
+          )
+        ).value;
+      }
+      if (status.err) {
+        throw new ConfirmError(
+          `Raw transaction ${signature} failed (${JSON.stringify(status)})`
+        );
+      }
+      return signature;
+    } catch (err: any) {
+      if (err?.name === "TimeoutError") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Transaction failed to confirm in 60s");
+}
+
+function patchAnchorSendAndConfirm(): void {
+  if (anchorSendCompatPatched) return;
+  anchorSendCompatPatched = true;
+
+  AnchorProvider.prototype.sendAndConfirm = async function (
+    tx: any,
+    signers?: any,
+    opts?: any
+  ): Promise<string> {
+    if (opts === undefined) {
+      opts = this.opts;
+    }
+    if (isVersionedTransaction(tx)) {
+      if (signers) {
+        tx.sign(signers);
+      }
+    } else {
+      tx.feePayer = tx.feePayer ?? this.wallet.publicKey;
+      tx.recentBlockhash = (
+        await this.connection.getLatestBlockhash(opts.preflightCommitment)
+      ).blockhash;
+      if (signers) {
+        for (const signer of signers) {
+          tx.partialSign(signer);
+        }
+      }
+    }
+    tx = await this.wallet.signTransaction(tx);
+    const rawTx = tx.serialize();
+    try {
+      return await sendAndConfirmRawTransactionCompat(
+        this.connection,
+        rawTx,
+        opts
+      );
+    } catch (err: any) {
+      if (err instanceof ConfirmError) {
+        const signatureMatch = /Raw transaction ([^ ]+) failed/.exec(
+          err.message
+        );
+        const txSig = signatureMatch?.[1];
+        if (!txSig) {
+          throw err;
+        }
+        const maxVer = isVersionedTransaction(tx) ? 0 : undefined;
+        const failedTx = await this.connection.getTransaction(txSig, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: maxVer,
+        });
+        if (!failedTx) {
+          throw err;
+        }
+        const logs = failedTx.meta?.logMessages;
+        if (!logs) {
+          throw err;
+        }
+        throw new web3.SendTransactionError({
+          action: "send",
+          signature: txSig,
+          transactionMessage: err.message,
+          logs,
+        });
+      }
+      throw err;
+    }
+  };
+
+  AnchorProvider.prototype.sendAll = async function (
+    txWithSigners: any,
+    opts?: any
+  ): Promise<string[]> {
+    if (opts === undefined) {
+      opts = this.opts;
+    }
+    const recentBlockhash = (
+      await this.connection.getLatestBlockhash(opts.preflightCommitment)
+    ).blockhash;
+    const txs = txWithSigners.map((r: any) => {
+      if (isVersionedTransaction(r.tx)) {
+        const tx = r.tx;
+        if (r.signers) {
+          tx.sign(r.signers);
+        }
+        return tx;
+      }
+      const tx = r.tx;
+      const signerList = r.signers ?? [];
+      tx.feePayer = tx.feePayer ?? this.wallet.publicKey;
+      tx.recentBlockhash = recentBlockhash;
+      signerList.forEach((kp: any) => {
+        tx.partialSign(kp);
+      });
+      return tx;
+    });
+    const signedTxs = await this.wallet.signAllTransactions(txs);
+    const sigs: string[] = [];
+    for (let k = 0; k < txs.length; k += 1) {
+      const tx = signedTxs[k];
+      const rawTx = tx.serialize();
+      try {
+        sigs.push(
+          await sendAndConfirmRawTransactionCompat(
+            this.connection,
+            rawTx,
+            opts
+          )
+        );
+      } catch (err: any) {
+        if (err instanceof ConfirmError) {
+          const signatureMatch = /Raw transaction ([^ ]+) failed/.exec(
+            err.message
+          );
+          const txSig = signatureMatch?.[1];
+          if (!txSig) {
+            throw err;
+          }
+          const maxVer = isVersionedTransaction(tx) ? 0 : undefined;
+          const failedTx = await this.connection.getTransaction(txSig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: maxVer,
+          });
+          if (!failedTx) {
+            throw err;
+          }
+          const logs = failedTx.meta?.logMessages;
+          if (!logs) {
+            throw err;
+          }
+          throw new web3.SendTransactionError({
+            action: "send",
+            signature: txSig,
+            transactionMessage: err.message,
+            logs,
+          });
+        }
+        throw err;
+      }
+    }
+    return sigs;
+  };
+}
 
 function elapsed(): string {
   const diff = Math.floor((Date.now() - scriptStart) / 1000);
@@ -272,8 +492,22 @@ function buildInitPlanetValues(x: bigint, y: bigint): bigint[] {
 function buildInitSpawnPlanetValues(
   x: bigint, y: bigint, playerId: bigint, sourcePlanetId: bigint
 ): bigint[] {
-  return [BigInt.asUintN(64, x), BigInt.asUintN(64, y), playerId, sourcePlanetId];
+  return [
+    BigInt.asUintN(64, x),
+    BigInt.asUintN(64, y),
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+  ];
 }
+
+/**
+ * Pack 8 u32 values into 2 field elements for Pack<[u32; 8]>.
+ * FE layout: floor(255/32) = 7 values per FE.
+ *   FE0 = v[0] + v[1]*2^32 + v[2]*2^64 + ... + v[6]*2^192
+ *   FE1 = v[7]
+ * Coordinates are biased by COORD_BIAS to be positive u32.
+ */
+const COORD_BIAS = 1n << 31n;
 
 function buildProcessMoveValues(
   playerId: bigint, sourcePlanetId: bigint,
@@ -281,11 +515,23 @@ function buildProcessMoveValues(
   sourceX: bigint, sourceY: bigint,
   targetX: bigint, targetY: bigint,
 ): bigint[] {
-  return [
-    playerId, sourcePlanetId, shipsToSend, metalToSend,
-    BigInt.asUintN(64, sourceX), BigInt.asUintN(64, sourceY),
-    BigInt.asUintN(64, targetX), BigInt.asUintN(64, targetY),
+  const vals = [
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+    BigInt.asUintN(32, shipsToSend),
+    BigInt.asUintN(32, metalToSend),
+    BigInt.asUintN(32, sourceX + COORD_BIAS),
+    BigInt.asUintN(32, sourceY + COORD_BIAS),
+    BigInt.asUintN(32, targetX + COORD_BIAS),
+    BigInt.asUintN(32, targetY + COORD_BIAS),
   ];
+  // Pack into 2 field elements: 7 values in FE0, 1 in FE1
+  let fe0 = 0n;
+  for (let i = 6; i >= 0; i--) {
+    fe0 = (fe0 << 32n) | vals[i];
+  }
+  const fe1 = vals[7];
+  return [fe0, fe1];
 }
 
 async function waitForSlot(connection: Connection, targetSlot: bigint, label: string) {
@@ -301,7 +547,12 @@ function buildFlushPlanetValues(
   currentSlot: bigint, gameSpeed: bigint,
   lastUpdatedSlot: bigint, flushCount: bigint
 ): bigint[] {
-  return [currentSlot, gameSpeed, lastUpdatedSlot, flushCount];
+  return [
+    BigInt.asUintN(32, currentSlot),
+    BigInt.asUintN(32, gameSpeed),
+    BigInt.asUintN(32, lastUpdatedSlot),
+    BigInt.asUintN(32, flushCount),
+  ];
 }
 
 function buildUpgradePlanetValues(
@@ -309,7 +560,14 @@ function buildUpgradePlanetValues(
   currentSlot: bigint, gameSpeed: bigint,
   lastUpdatedSlot: bigint, metalUpgradeCost: bigint
 ): bigint[] {
-  return [playerId, BigInt(focus), currentSlot, gameSpeed, lastUpdatedSlot, metalUpgradeCost];
+  return [
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, BigInt(focus)),
+    BigInt.asUintN(32, currentSlot),
+    BigInt.asUintN(32, gameSpeed),
+    BigInt.asUintN(32, lastUpdatedSlot),
+    BigInt.asUintN(32, metalUpgradeCost),
+  ];
 }
 
 function computeCurrentResource(
@@ -327,6 +585,7 @@ function computeCurrentResource(
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  patchAnchorSendAndConfirm();
   banner("Encrypted Forest — E2E Game Test");
 
   // =========================================================================
@@ -552,8 +811,8 @@ async function main() {
   }
 
   const [aliceSpawnResult, bobSpawnResult] = await Promise.all([
-    queueSpawn(alice, aliceSpawn.x, aliceSpawn.y, 0n, 0n, encAlice),
-    queueSpawn(bob, bobSpawn.x, bobSpawn.y, 0n, 0n, encBob),
+    queueSpawn(alice, aliceSpawn.x, aliceSpawn.y, 1n, 0n, encAlice),
+    queueSpawn(bob, bobSpawn.x, bobSpawn.y, 2n, 0n, encBob),
   ]);
 
   task("Waiting for MPC finalization (both players in parallel)...");
@@ -623,7 +882,7 @@ async function main() {
 
   const nearbyBody = await program.account.encryptedCelestialBody.fetch(nearbyPlanetPDA);
   assert(
-    nearbyBody.staticEncCiphertexts.length === 4,
+    nearbyBody.stateEncCiphertexts.length === 3,
     `Planet initialized: ${nearbyPlanetPDA.toString().slice(0, 16)}...`,
     "Failed to initialize nearby planet"
   );
@@ -644,7 +903,9 @@ async function main() {
 
   const dist1 = computeDistance(aliceSpawn.x, aliceSpawn.y, nearbyPlanet.x, nearbyPlanet.y);
   info(`Distance: ${dist1}`);
-  const landingSlot1 = computeLandingSlot(currentSlot1, dist1, 2n, 1000n);
+  const minBuffer = 5n; // ensure landing_slot is far enough in the future to survive tx processing
+  const rawLandingSlot1 = computeLandingSlot(currentSlot1, dist1, 2n, 1000n);
+  const landingSlot1 = (rawLandingSlot1 - currentSlot1 < minBuffer) ? currentSlot1 + minBuffer : rawLandingSlot1;
   info(`Landing slot: ${landingSlot1} (current: ${currentSlot1})`);
 
   const moveValues1 = buildProcessMoveValues(
@@ -660,7 +921,6 @@ async function main() {
 
   const moveCO1 = new BN(randomBytes(8), "hex");
   const moveArcium1 = getArciumAccountAddresses(program.programId, moveCO1, "process_move");
-  const moveObserver1 = x25519.getPublicKey(x25519.utils.randomSecretKey());
 
   task("Queuing process_move MPC...");
   await client
@@ -676,14 +936,13 @@ async function main() {
       moveCts: movePacked1,
       movePubkey: encAlice.publicKey,
       moveNonce: BigInt(moveNonceValue1.toString()),
-      observerPubkey: moveObserver1,
       sourceBody: alicePlanetPDA,
       sourcePending: aliceSourcePendingPDA,
       targetPending: nearbyPendingPDA,
       moveAccount: derivePendingMoveAccountPDA(gameId, nearbyHash, 0n, program.programId)[0],
     }, moveArcium1)
     .signers([alice])
-    .rpc({ skipPreflight: true, commitment: "confirmed" });
+    .rpc({ commitment: "confirmed" });
 
   task("Waiting for MPC finalization...");
   await awaitComputationFinalization(provider, moveCO1, program.programId, "confirmed");
@@ -710,7 +969,8 @@ async function main() {
 
   const dist2 = computeDistance(bobSpawn.x, bobSpawn.y, aliceSpawn.x, aliceSpawn.y);
   info(`Attack distance: ${dist2}`);
-  const landingSlot2 = computeLandingSlot(currentSlot2, dist2, 2n, 1000n);
+  const rawLandingSlot2 = computeLandingSlot(currentSlot2, dist2, 2n, 1000n);
+  const landingSlot2 = (rawLandingSlot2 - currentSlot2 < minBuffer) ? currentSlot2 + minBuffer : rawLandingSlot2;
   info(`Landing slot: ${landingSlot2}`);
 
   const moveValues2 = buildProcessMoveValues(
@@ -722,11 +982,10 @@ async function main() {
 
   const moveNonce2 = randomBytes(16);
   const moveNonceValue2 = deserializeLE(moveNonce2);
-  const { packed: movePacked2 } = encryptAndPack(encAlice.cipher, moveValues2, moveNonce2);
+  const { packed: movePacked2 } = encryptAndPack(encBob.cipher, moveValues2, moveNonce2);
 
   const moveCO2 = new BN(randomBytes(8), "hex");
   const moveArcium2 = getArciumAccountAddresses(program.programId, moveCO2, "process_move");
-  const moveObserver2 = x25519.getPublicKey(x25519.utils.randomSecretKey());
 
   task("Queuing process_move MPC (Bob's attack)...");
   await client
@@ -742,7 +1001,6 @@ async function main() {
       moveCts: movePacked2,
       movePubkey: encBob.publicKey,
       moveNonce: BigInt(moveNonceValue2.toString()),
-      observerPubkey: moveObserver2,
       sourceBody: bobPlanetPDA,
       sourcePending: bobSourcePendingPDA,
       targetPending: aliceSourcePendingPDA,
@@ -932,13 +1190,13 @@ async function main() {
 
   const nearbyBodyAfterUpgrade = await program.account.encryptedCelestialBody.fetch(nearbyPlanetPDA);
 
-  const beforeNonce = Buffer.from(nearbyBodyForUpgrade.staticEncNonce as any).toString("hex");
-  const afterNonce = Buffer.from(nearbyBodyAfterUpgrade.staticEncNonce as any).toString("hex");
-  const beforeDynamic = nearbyBodyForUpgrade.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-  const afterDynamic = nearbyBodyAfterUpgrade.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+  const beforeNonce = Buffer.from(nearbyBodyForUpgrade.stateEncNonce as any).toString("hex");
+  const afterNonce = Buffer.from(nearbyBodyAfterUpgrade.stateEncNonce as any).toString("hex");
+  const beforeState = nearbyBodyForUpgrade.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+  const afterState = nearbyBodyAfterUpgrade.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
 
   assert(
-    beforeNonce !== afterNonce || beforeDynamic !== afterDynamic,
+    beforeNonce !== afterNonce || beforeState !== afterState,
     "Planet encrypted state updated after upgrade",
     "Planet state unchanged after upgrade"
   );

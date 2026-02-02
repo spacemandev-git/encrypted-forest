@@ -109,12 +109,9 @@ export function createPlanetsStore(
     };
 
     if (entry.encrypted) {
-      persisted.staticEncPubkey = Array.from(entry.encrypted.staticEncPubkey);
-      persisted.staticEncNonce = Array.from(entry.encrypted.staticEncNonce);
-      persisted.staticEncCiphertexts = serializeCiphertexts(entry.encrypted.staticEncCiphertexts);
-      persisted.dynamicEncPubkey = Array.from(entry.encrypted.dynamicEncPubkey);
-      persisted.dynamicEncNonce = Array.from(entry.encrypted.dynamicEncNonce);
-      persisted.dynamicEncCiphertexts = serializeCiphertexts(entry.encrypted.dynamicEncCiphertexts);
+      persisted.stateEncPubkey = Array.from(entry.encrypted.stateEncPubkey);
+      persisted.stateEncNonce = Array.from(entry.encrypted.stateEncNonce);
+      persisted.stateEncCiphertexts = serializeCiphertexts(entry.encrypted.stateEncCiphertexts);
     }
 
     await persistPlanet(persisted);
@@ -202,18 +199,15 @@ export function createPlanetsStore(
         hashHex: p.hashHex,
       };
 
-      if (p.staticEncNonce && p.staticEncCiphertexts && p.dynamicEncNonce && p.dynamicEncCiphertexts) {
+      if (p.stateEncNonce && p.stateEncCiphertexts) {
         try {
           const cachedEncrypted: EncryptedCelestialBodyAccount = {
             planetHash: new Uint8Array(p.hash),
             lastUpdatedSlot: 0n,
             lastFlushedSlot: 0n,
-            staticEncPubkey: p.staticEncPubkey ? new Uint8Array(p.staticEncPubkey) : mxePublicKey,
-            staticEncNonce: new Uint8Array(p.staticEncNonce),
-            staticEncCiphertexts: deserializeCiphertexts(p.staticEncCiphertexts, 32),
-            dynamicEncPubkey: p.dynamicEncPubkey ? new Uint8Array(p.dynamicEncPubkey) : mxePublicKey,
-            dynamicEncNonce: new Uint8Array(p.dynamicEncNonce),
-            dynamicEncCiphertexts: deserializeCiphertexts(p.dynamicEncCiphertexts, 32),
+            stateEncPubkey: p.stateEncPubkey ? new Uint8Array(p.stateEncPubkey) : mxePublicKey,
+            stateEncNonce: new Uint8Array(p.stateEncNonce),
+            stateEncCiphertexts: deserializeCiphertexts(p.stateEncCiphertexts, 32),
           };
           entry.encrypted = cachedEncrypted;
           entry.decrypted = decryptPlanetState(entry.discovery.hash, cachedEncrypted);

@@ -166,19 +166,12 @@ describe("Arcium Init Planet", () => {
     // Verify the encrypted celestial body account
     const bodyAccount = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(bodyAccount.planetHash).toEqual(Array.from(coord.hash));
-    expect(bodyAccount.staticEncPubkey.length).toBe(32);
-    expect(bodyAccount.staticEncNonce.length).toBe(16);
-    expect(bodyAccount.staticEncCiphertexts.length).toBe(4);
-    expect(bodyAccount.dynamicEncPubkey.length).toBe(32);
-    expect(bodyAccount.dynamicEncNonce.length).toBe(16);
-    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(2);
+    expect(bodyAccount.stateEncPubkey.length).toBe(32);
+    expect(bodyAccount.stateEncNonce.length).toBe(16);
+    expect(bodyAccount.stateEncCiphertexts.length).toBe(3);
 
-    // Each static ciphertext should be 32 bytes
-    for (const ct of bodyAccount.staticEncCiphertexts) {
-      expect(ct.length).toBe(32);
-    }
-    // Each dynamic ciphertext should be 32 bytes
-    for (const ct of bodyAccount.dynamicEncCiphertexts) {
+    // Each ciphertext should be 32 bytes
+    for (const ct of bodyAccount.stateEncCiphertexts) {
       expect(ct.length).toBe(32);
     }
 
@@ -278,8 +271,7 @@ describe("Arcium Init Spawn Planet", () => {
     // Verify encrypted celestial body was created
     const bodyAccount = await program.account.encryptedCelestialBody.fetch(planetPDA);
     expect(bodyAccount.planetHash).toEqual(Array.from(spawn.hash));
-    expect(bodyAccount.staticEncCiphertexts.length).toBe(4);
-    expect(bodyAccount.dynamicEncCiphertexts.length).toBe(2);
+    expect(bodyAccount.stateEncCiphertexts.length).toBe(3);
   });
 
   it("rejects spawn when player already spawned", async () => {
@@ -624,18 +616,12 @@ describe("Arcium Upgrade Planet", () => {
     );
     // The enc_nonce and/or enc_ciphertexts should differ from before
     // (the MPC re-encrypted with new state)
-    const beforeStaticNonce = Buffer.from(bodyBefore.staticEncNonce as any).toString("hex");
-    const afterStaticNonce = Buffer.from(bodyAfter.staticEncNonce as any).toString("hex");
-    const beforeDynamicNonce = Buffer.from(bodyBefore.dynamicEncNonce as any).toString("hex");
-    const afterDynamicNonce = Buffer.from(bodyAfter.dynamicEncNonce as any).toString("hex");
-    // After upgrade, at minimum the dynamic nonce or ciphertexts should change
-    const dynamicCtsBefore = bodyBefore.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const dynamicCtsAfter = bodyAfter.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const staticCtsBefore = bodyBefore.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const staticCtsAfter = bodyAfter.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    // At least one of the encrypted fields should have changed
-    const beforeAll = beforeStaticNonce + staticCtsBefore + beforeDynamicNonce + dynamicCtsBefore;
-    const afterAll = afterStaticNonce + staticCtsAfter + afterDynamicNonce + dynamicCtsAfter;
+    const beforeStateNonce = Buffer.from(bodyBefore.stateEncNonce as any).toString("hex");
+    const afterStateNonce = Buffer.from(bodyAfter.stateEncNonce as any).toString("hex");
+    const stateCtsBefore = bodyBefore.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const stateCtsAfter = bodyAfter.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const beforeAll = beforeStateNonce + stateCtsBefore;
+    const afterAll = afterStateNonce + stateCtsAfter;
     expect(beforeAll).not.toBe(afterAll);
   });
 });

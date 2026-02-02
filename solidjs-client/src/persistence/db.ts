@@ -29,12 +29,9 @@ export interface PersistedPlanet {
   size: number;
   comets: number[];
   lastFetched: number;
-  staticEncPubkey?: number[];
-  staticEncNonce?: number[];
-  staticEncCiphertexts?: number[];
-  dynamicEncPubkey?: number[];
-  dynamicEncNonce?: number[];
-  dynamicEncCiphertexts?: number[];
+  stateEncPubkey?: number[];
+  stateEncNonce?: number[];
+  stateEncCiphertexts?: number[];
 }
 
 export interface PersistedEvent {

@@ -189,19 +189,13 @@ describe("Queue Process Move", () => {
     expect(Number(bodyAfter.lastUpdatedSlot)).toBeGreaterThanOrEqual(
       Number(bodyBefore.lastUpdatedSlot)
     );
-    // Ciphertexts should have changed (check both static and dynamic)
-    const staticCtsBefore = bodyBefore.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const staticCtsAfter = bodyAfter.staticEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const dynamicCtsBefore = bodyBefore.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const dynamicCtsAfter = bodyAfter.dynamicEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
-    const staticNonceBefore = Buffer.from(bodyBefore.staticEncNonce as any).toString("hex");
-    const staticNonceAfter = Buffer.from(bodyAfter.staticEncNonce as any).toString("hex");
-    const dynamicNonceBefore = Buffer.from(bodyBefore.dynamicEncNonce as any).toString("hex");
-    const dynamicNonceAfter = Buffer.from(bodyAfter.dynamicEncNonce as any).toString("hex");
+    const stateCtsBefore = bodyBefore.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const stateCtsAfter = bodyAfter.stateEncCiphertexts.map((c: any) => Buffer.from(c).toString("hex")).join("");
+    const stateNonceBefore = Buffer.from(bodyBefore.stateEncNonce as any).toString("hex");
+    const stateNonceAfter = Buffer.from(bodyAfter.stateEncNonce as any).toString("hex");
 
-    // At least the dynamic state should change (ships deducted)
-    const beforeFingerprint = dynamicNonceBefore + dynamicCtsBefore;
-    const afterFingerprint = dynamicNonceAfter + dynamicCtsAfter;
+    const beforeFingerprint = stateNonceBefore + stateCtsBefore;
+    const afterFingerprint = stateNonceAfter + stateCtsAfter;
     expect(beforeFingerprint).not.toBe(afterFingerprint);
   });
 });

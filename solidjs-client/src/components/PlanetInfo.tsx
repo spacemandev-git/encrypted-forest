@@ -5,6 +5,7 @@
 import type { Accessor } from "solid-js";
 import { Show } from "solid-js";
 import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
+import DraggablePanel from "./DraggablePanel.js";
 import tui from "../styles/tui.module.css";
 
 interface PlanetInfoProps {
@@ -36,26 +37,14 @@ export default function PlanetInfo(props: PlanetInfoProps) {
 
   return (
     <Show when={p()}>
-      <div
-        class={tui.panel}
-        style={{
-          position: "fixed",
-          right: "16px",
-          top: "48px",
-          width: "280px",
-          padding: "12px",
-          "z-index": "200",
-        }}
+      <DraggablePanel
+        title={BODY_TYPE_NAMES[p()!.discovery.properties.bodyType] ?? "Unknown"}
+        initialX={window.innerWidth - 310}
+        initialY={48}
+        width="280px"
+        zIndex={200}
+        onClose={props.onClose}
       >
-        <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "12px" }}>
-          <span class={tui.accent} style={{ "font-size": "14px", "font-weight": "600" }}>
-            {BODY_TYPE_NAMES[p()!.discovery.properties.bodyType] ?? "Unknown"}
-          </span>
-          <button class={tui.button} onClick={props.onClose} style={{ padding: "2px 8px" }}>
-            x
-          </button>
-        </div>
-
         <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
           <Row label="COORDS" value={`${p()!.discovery.x}, ${p()!.discovery.y}`} />
           <Row label="SIZE" value={SIZE_NAMES[p()!.discovery.properties.size] ?? "?"} />
@@ -74,7 +63,7 @@ export default function PlanetInfo(props: PlanetInfoProps) {
             <Row label="VELOCITY" value={p()!.decrypted!.static.launchVelocity.toString()} />
           </Show>
         </div>
-      </div>
+      </DraggablePanel>
     </Show>
   );
 }

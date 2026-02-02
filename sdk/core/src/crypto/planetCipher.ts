@@ -5,12 +5,11 @@
  * The shared secret with the MXE's public key gives the cipher key.
  * Clients who know (x, y) can decrypt planet state locally without any transaction.
  *
- * The on-chain EncryptedCelestialBody stores TWO separate encryption sections:
- *   - Static (4 packed FEs): Pack<[u64;11]> containing body_type, size,
+ * The on-chain EncryptedCelestialBody stores a single encryption section:
+ *   - State (3 packed FEs): Pack<[u32;15]> containing body_type, size,
  *     max_ship_capacity, ship_gen_speed, max_metal_capacity, metal_gen_speed,
- *     range, launch_velocity, level, comet_0, comet_1
- *   - Dynamic (2 packed FEs): Pack<[u64;4]> containing ship_count, metal_count,
- *     owner_exists, owner_id
+ *     range, launch_velocity, level, comet_0, comet_1, ship_count,
+ *     metal_count, owner_exists, owner_id
  *
  * NOTE: Actual RescueCipher encryption/decryption requires @arcium-hq/client.
  * The placeholders below read raw little-endian u64 from ciphertext bytes,
@@ -23,7 +22,7 @@ import { x25519 } from "@noble/curves/ed25519.js";
 // Decrypted state interfaces
 // ---------------------------------------------------------------------------
 
-/** Decrypted static planet properties -- 11 u64 values packed into 4 FEs. */
+/** Decrypted static planet properties -- 11 u32 values packed into 3 FEs. */
 export interface PlanetStaticState {
   bodyType: number;
   size: number;
@@ -126,33 +125,44 @@ export function decryptFieldElement(
 // ---------------------------------------------------------------------------
 
 /**
- * Unpack u64 values from packed field elements.
- * Each FE holds ~26 bytes (208 usable bits). u64 values are packed as 8-byte LE chunks.
+ * Unpack u32 values from packed field elements.
+ * Each FE holds ~26 bytes (208 usable bits). u32 values are packed as 4-byte LE chunks.
  * This is a placeholder that reads from the raw ciphertext bytes directly.
  *
  * NOTE: In production with actual RescueCipher, the generated packers from
- * @arcium-hq/client should be used instead. This placeholder reads LE u64s
+ * @arcium-hq/client should be used instead. This placeholder reads LE u32s
  * sequentially from concatenated FE bytes.
  */
-function unpackU64Array(ciphertexts: Uint8Array[], count: number): bigint[] {
+function unpackU32Array(ciphertexts: Uint8Array[], count: number): number[] {
   // Concatenate all ciphertext field elements into a single byte buffer
   const totalBytes = ciphertexts.length * 32;
   const buf = new Uint8Array(totalBytes);
   for (let i = 0; i < ciphertexts.length; i++) {
     buf.set(ciphertexts[i], i * 32);
   }
-  // Read `count` u64 values as LE from the buffer
+  // Read `count` u32 values as LE from the buffer
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const values: bigint[] = [];
+  const values: number[] = [];
   for (let i = 0; i < count; i++) {
-    values.push(view.getBigUint64(i * 8, true));
+    values.push(view.getUint32(i * 4, true));
   }
   return values;
 }
 
+function unpackPlanetState(ciphertexts: Uint8Array[]): number[] {
+  if (ciphertexts.length < 3) {
+    throw new Error(
+      `Expected 3 ciphertexts for PlanetState, got ${ciphertexts.length}`
+    );
+  }
+
+  const feBlobs = ciphertexts.slice(0, 3);
+  return unpackU32Array(feBlobs, 15);
+}
+
 /**
- * Decrypt the PlanetStatic packed fields from static encryption section.
- * 4 FEs -> unpack to 11 u64 values.
+ * Decrypt the PlanetStatic packed fields from the state encryption section.
+ * 3 FEs -> unpack to 11 u32 values.
  */
 export function decryptPlanetStatic(
   planetHash: Uint8Array,
@@ -160,43 +170,26 @@ export function decryptPlanetStatic(
   encNonce: Uint8Array,
   ciphertexts: Uint8Array[]
 ): PlanetStaticState {
-  if (ciphertexts.length < 4) {
-    throw new Error(
-      `Expected 4 ciphertexts for PlanetStatic, got ${ciphertexts.length}`
-    );
-  }
-
-  const sharedSecret = computeSharedSecret(planetHash, encPubkey);
-
-  // Decrypt each field element
-  const decryptedFEs = ciphertexts.slice(0, 4).map((ct) =>
-    decryptFieldElement(ct, sharedSecret, encNonce)
-  );
-
-  // For placeholder (non-RescueCipher): each FE is a raw LE u64,
-  // but packed data stores multiple u64s per FE.
-  // Reconstruct the 4 FE ciphertext blobs and unpack 11 u64s.
-  const feBlobs = ciphertexts.slice(0, 4);
-  const values = unpackU64Array(feBlobs, 11);
+  const values = unpackPlanetState(ciphertexts);
 
   return {
-    bodyType: Number(values[0]),
-    size: Number(values[1]),
-    maxShipCapacity: values[2],
-    shipGenSpeed: values[3],
-    maxMetalCapacity: values[4],
-    metalGenSpeed: values[5],
-    range: values[6],
-    launchVelocity: values[7],
-    level: Number(values[8]),
-    comet0: Number(values[9]),
-    comet1: Number(values[10]),
+    bodyType: values[0],
+    size: values[1],
+    maxShipCapacity: BigInt(values[2]),
+    shipGenSpeed: BigInt(values[3]),
+    maxMetalCapacity: BigInt(values[4]),
+    metalGenSpeed: BigInt(values[5]),
+    range: BigInt(values[6]),
+    launchVelocity: BigInt(values[7]),
+    level: values[8],
+    comet0: values[9],
+    comet1: values[10],
   };
 }
 
 /**
- * Decrypt the PlanetDynamic packed fields from dynamic encryption section.
- * 2 FEs -> unpack to 4 u64 values.
+ * Decrypt the PlanetDynamic packed fields from the state encryption section.
+ * 3 FEs -> unpack to 4 u32 values.
  */
 export function decryptPlanetDynamic(
   planetHash: Uint8Array,
@@ -204,52 +197,49 @@ export function decryptPlanetDynamic(
   encNonce: Uint8Array,
   ciphertexts: Uint8Array[]
 ): PlanetDynamicState {
-  if (ciphertexts.length < 2) {
-    throw new Error(
-      `Expected 2 ciphertexts for PlanetDynamic, got ${ciphertexts.length}`
-    );
-  }
-
-  const sharedSecret = computeSharedSecret(planetHash, encPubkey);
-
-  const feBlobs = ciphertexts.slice(0, 2);
-  const values = unpackU64Array(feBlobs, 4);
+  const values = unpackPlanetState(ciphertexts);
 
   return {
-    shipCount: values[0],
-    metalCount: values[1],
-    ownerExists: Number(values[2]),
-    ownerId: values[3],
+    shipCount: BigInt(values[11]),
+    metalCount: BigInt(values[12]),
+    ownerExists: values[13],
+    ownerId: BigInt(values[14]),
   };
 }
 
 /**
- * Decrypt both static and dynamic sections from an EncryptedCelestialBodyAccount.
+ * Decrypt the full planet state from an EncryptedCelestialBodyAccount.
  */
 export function decryptPlanetState(
   planetHash: Uint8Array,
   account: {
-    staticEncPubkey: Uint8Array;
-    staticEncNonce: Uint8Array;
-    staticEncCiphertexts: Uint8Array[];
-    dynamicEncPubkey: Uint8Array;
-    dynamicEncNonce: Uint8Array;
-    dynamicEncCiphertexts: Uint8Array[];
+    stateEncPubkey: Uint8Array;
+    stateEncNonce: Uint8Array;
+    stateEncCiphertexts: Uint8Array[];
   }
 ): PlanetState {
+  const values = unpackPlanetState(account.stateEncCiphertexts);
+
   return {
-    static: decryptPlanetStatic(
-      planetHash,
-      account.staticEncPubkey,
-      account.staticEncNonce,
-      account.staticEncCiphertexts
-    ),
-    dynamic: decryptPlanetDynamic(
-      planetHash,
-      account.dynamicEncPubkey,
-      account.dynamicEncNonce,
-      account.dynamicEncCiphertexts
-    ),
+    static: {
+      bodyType: values[0],
+      size: values[1],
+      maxShipCapacity: BigInt(values[2]),
+      shipGenSpeed: BigInt(values[3]),
+      maxMetalCapacity: BigInt(values[4]),
+      metalGenSpeed: BigInt(values[5]),
+      range: BigInt(values[6]),
+      launchVelocity: BigInt(values[7]),
+      level: values[8],
+      comet0: values[9],
+      comet1: values[10],
+    },
+    dynamic: {
+      shipCount: BigInt(values[11]),
+      metalCount: BigInt(values[12]),
+      ownerExists: values[13],
+      ownerId: BigInt(values[14]),
+    },
   };
 }
 
@@ -271,16 +261,16 @@ export function decryptPendingMoveData(
   }
 
   // NOTE: PendingMoveData is Enc<Mxe, ...> so clients cannot decrypt it.
-  // This reads raw LE u64 for local testing only.
-  const readU64 = (ct: Uint8Array): bigint => {
+  // This reads raw LE u32 for local testing only.
+  const readU32 = (ct: Uint8Array): bigint => {
     const view = new DataView(ct.buffer, ct.byteOffset, ct.byteLength);
-    return view.getBigUint64(0, true);
+    return BigInt(view.getUint32(0, true));
   };
 
   return {
-    shipsArriving: readU64(ciphertexts[0]),
-    metalArriving: readU64(ciphertexts[1]),
-    attackingPlanetId: readU64(ciphertexts[2]),
-    attackingPlayerId: readU64(ciphertexts[3]),
+    shipsArriving: readU32(ciphertexts[0]),
+    metalArriving: readU32(ciphertexts[1]),
+    attackingPlanetId: readU32(ciphertexts[2]),
+    attackingPlayerId: readU32(ciphertexts[3]),
   };
 }

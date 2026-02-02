@@ -2,40 +2,48 @@
 // Schema version: 1
 import { createPacker } from '@arcium-hq/client';
 
-export interface [u64;11] {
+export interface [u32;15] {
     : (number | bigint)[];
 }
 
-export interface [u64;11]Output {
+export interface [u32;15]Output {
     : bigint[];
 }
 
-export interface [u64;4] {
+export interface [u32;8] {
     : (number | bigint)[];
 }
 
-export interface [u64;4]Output {
+export interface [u32;8]Output {
     : bigint[];
 }
 
 export const circuits = {
-    [u64;11]: createPacker<[u64;11], [u64;11]Output>([
-        { name: '[0]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[1]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[2]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[3]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[4]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[5]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[6]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[7]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[8]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[9]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[10]', type: { Integer: { signed: false, width: 64 } } },
-    ] as const, '[u64;11]'),
-    [u64;4]: createPacker<[u64;4], [u64;4]Output>([
-        { name: '[0]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[1]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[2]', type: { Integer: { signed: false, width: 64 } } },
-        { name: '[3]', type: { Integer: { signed: false, width: 64 } } },
-    ] as const, '[u64;4]'),
+    [u32;15]: createPacker<[u32;15], [u32;15]Output>([
+        { name: '[0]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[1]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[2]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[3]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[4]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[5]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[6]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[7]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[8]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[9]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[10]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[11]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[12]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[13]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[14]', type: { Integer: { signed: false, width: 32 } } },
+    ] as const, '[u32;15]'),
+    [u32;8]: createPacker<[u32;8], [u32;8]Output>([
+        { name: '[0]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[1]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[2]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[3]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[4]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[5]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[6]', type: { Integer: { signed: false, width: 32 } } },
+        { name: '[7]', type: { Integer: { signed: false, width: 32 } } },
+    ] as const, '[u32;8]'),
 } as const;

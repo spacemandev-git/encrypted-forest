@@ -90,12 +90,11 @@ export interface CelestialBodyStats {
  * Raw on-chain EncryptedCelestialBody account.
  * Matches the Rust `EncryptedCelestialBody` struct.
  *
- * Has TWO separate encryption sections:
- *   Static  (4 packed FEs): Pack<[u64;11]> containing body_type, size,
- *           max_ship_capacity, ship_gen_speed, max_metal_capacity,
- *           metal_gen_speed, range, launch_velocity, level, comet_0, comet_1
- *   Dynamic (2 packed FEs): Pack<[u64;4]> containing ship_count, metal_count,
- *           owner_exists, owner_id
+ * Has ONE encryption section:
+ *   State (3 packed FEs): Pack<[u32;15]> containing body_type, size,
+ *          max_ship_capacity, ship_gen_speed, max_metal_capacity,
+ *          metal_gen_speed, range, launch_velocity, level, comet_0,
+ *          comet_1, ship_count, metal_count, owner_exists, owner_id
  *
  * PDA: ["planet", game_id.to_le_bytes(), planet_hash]
  */
@@ -103,18 +102,11 @@ export interface EncryptedCelestialBodyAccount {
   planetHash: Uint8Array; // [u8; 32]
   lastUpdatedSlot: bigint;
   lastFlushedSlot: bigint;
-  // Static encryption section (4 packed FE ciphertexts)
-  staticEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
-  staticEncNonce: Uint8Array; // [u8; 16]
-  staticEncCiphertexts: Uint8Array[]; // 4 x [u8; 32]
-  // Dynamic encryption section (2 packed FE ciphertexts)
-  dynamicEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
-  dynamicEncNonce: Uint8Array; // [u8; 16]
-  dynamicEncCiphertexts: Uint8Array[]; // 2 x [u8; 32]
+  // State encryption section (3 packed FE ciphertexts)
+  stateEncPubkey: Uint8Array; // [u8; 32] -- x25519 pubkey
+  stateEncNonce: Uint8Array; // [u8; 16]
+  stateEncCiphertexts: Uint8Array[]; // 3 x [u8; 32]
 }
 
-/** Number of static encrypted field elements (Pack<[u64;11]> = 4 FEs). */
-export const PLANET_STATIC_FIELDS = 4;
-
-/** Number of dynamic encrypted field elements (Pack<[u64;4]> = 2 FEs). */
-export const PLANET_DYNAMIC_FIELDS = 2;
+/** Number of encrypted field elements (Pack<[u32;15]> = 3 FEs). */
+export const PLANET_STATE_FIELDS = 3;

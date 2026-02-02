@@ -15,6 +15,7 @@ import {
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
+import * as web3 from "@solana/web3.js";
 import { readFileSync } from "fs";
 import {
   getArciumEnv,
@@ -35,6 +36,225 @@ import {
 } from "@arcium-hq/client";
 import { randomBytes } from "crypto";
 import type { EncryptedForest } from "../target/types/encrypted_forest";
+
+let anchorSendCompatPatched = false;
+
+class ConfirmError extends Error {}
+
+function isVersionedTransaction(tx: any): boolean {
+  return typeof tx?.version !== "undefined";
+}
+
+async function sendAndConfirmRawTransactionCompat(
+  connection: Connection,
+  rawTransaction: Buffer,
+  options?: {
+    skipPreflight?: boolean;
+    preflightCommitment?: string;
+    commitment?: string;
+    maxRetries?: number;
+    minContextSlot?: number;
+    blockhash?: any;
+  }
+): Promise<string> {
+  const sendOptions = options
+    ? {
+        skipPreflight: options.skipPreflight,
+        preflightCommitment: options.preflightCommitment || options.commitment,
+        maxRetries: options.maxRetries,
+        minContextSlot: options.minContextSlot,
+      }
+    : {};
+  let status;
+  const startTime = Date.now();
+  while (Date.now() - startTime < 60000) {
+    try {
+      const signature = await connection.sendRawTransaction(
+        rawTransaction,
+        sendOptions
+      );
+      if (options?.blockhash) {
+        if (sendOptions.maxRetries === 0) {
+          const abortSignal = AbortSignal.timeout(15000);
+          status = (
+            await connection.confirmTransaction(
+              { abortSignal, signature, ...options.blockhash },
+              options && options.commitment
+            )
+          ).value;
+        } else {
+          status = (
+            await connection.confirmTransaction(
+              { signature, ...options.blockhash },
+              options && options.commitment
+            )
+          ).value;
+        }
+      } else {
+        status = (
+          await connection.confirmTransaction(
+            signature,
+            options && options.commitment
+          )
+        ).value;
+      }
+      if (status.err) {
+        throw new ConfirmError(
+          `Raw transaction ${signature} failed (${JSON.stringify(status)})`
+        );
+      }
+      return signature;
+    } catch (err: any) {
+      if (err?.name === "TimeoutError") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Transaction failed to confirm in 60s");
+}
+
+function patchAnchorSendAndConfirm(): void {
+  if (anchorSendCompatPatched) return;
+  anchorSendCompatPatched = true;
+
+  AnchorProvider.prototype.sendAndConfirm = async function (
+    tx: any,
+    signers?: any,
+    opts?: any
+  ): Promise<string> {
+    if (opts === undefined) {
+      opts = this.opts;
+    }
+    if (isVersionedTransaction(tx)) {
+      if (signers) {
+        tx.sign(signers);
+      }
+    } else {
+      tx.feePayer = tx.feePayer ?? this.wallet.publicKey;
+      tx.recentBlockhash = (
+        await this.connection.getLatestBlockhash(opts.preflightCommitment)
+      ).blockhash;
+      if (signers) {
+        for (const signer of signers) {
+          tx.partialSign(signer);
+        }
+      }
+    }
+    tx = await this.wallet.signTransaction(tx);
+    const rawTx = tx.serialize();
+    try {
+      return await sendAndConfirmRawTransactionCompat(
+        this.connection,
+        rawTx,
+        opts
+      );
+    } catch (err: any) {
+      if (err instanceof ConfirmError) {
+        const signatureMatch = /Raw transaction ([^ ]+) failed/.exec(
+          err.message
+        );
+        const txSig = signatureMatch?.[1];
+        if (!txSig) {
+          throw err;
+        }
+        const maxVer = isVersionedTransaction(tx) ? 0 : undefined;
+        const failedTx = await this.connection.getTransaction(txSig, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: maxVer,
+        });
+        if (!failedTx) {
+          throw err;
+        }
+        const logs = failedTx.meta?.logMessages;
+        if (!logs) {
+          throw err;
+        }
+        throw new web3.SendTransactionError({
+          action: "send",
+          signature: txSig,
+          transactionMessage: err.message,
+          logs,
+        });
+      }
+      throw err;
+    }
+  };
+
+  AnchorProvider.prototype.sendAll = async function (
+    txWithSigners: any,
+    opts?: any
+  ): Promise<string[]> {
+    if (opts === undefined) {
+      opts = this.opts;
+    }
+    const recentBlockhash = (
+      await this.connection.getLatestBlockhash(opts.preflightCommitment)
+    ).blockhash;
+    const txs = txWithSigners.map((r: any) => {
+      if (isVersionedTransaction(r.tx)) {
+        const tx = r.tx;
+        if (r.signers) {
+          tx.sign(r.signers);
+        }
+        return tx;
+      }
+      const tx = r.tx;
+      const signerList = r.signers ?? [];
+      tx.feePayer = tx.feePayer ?? this.wallet.publicKey;
+      tx.recentBlockhash = recentBlockhash;
+      signerList.forEach((kp: any) => {
+        tx.partialSign(kp);
+      });
+      return tx;
+    });
+    const signedTxs = await this.wallet.signAllTransactions(txs);
+    const sigs: string[] = [];
+    for (let k = 0; k < txs.length; k += 1) {
+      const tx = signedTxs[k];
+      const rawTx = tx.serialize();
+      try {
+        sigs.push(
+          await sendAndConfirmRawTransactionCompat(
+            this.connection,
+            rawTx,
+            opts
+          )
+        );
+      } catch (err: any) {
+        if (err instanceof ConfirmError) {
+          const signatureMatch = /Raw transaction ([^ ]+) failed/.exec(
+            err.message
+          );
+          const txSig = signatureMatch?.[1];
+          if (!txSig) {
+            throw err;
+          }
+          const maxVer = isVersionedTransaction(tx) ? 0 : undefined;
+          const failedTx = await this.connection.getTransaction(txSig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: maxVer,
+          });
+          if (!failedTx) {
+            throw err;
+          }
+          const logs = failedTx.meta?.logMessages;
+          if (!logs) {
+            throw err;
+          }
+          throw new web3.SendTransactionError({
+            action: "send",
+            signature: txSig,
+            transactionMessage: err.message,
+            logs,
+          });
+        }
+        throw err;
+      }
+    }
+    return sigs;
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Re-export everything from SDK so test files can import from ./helpers
@@ -85,8 +305,7 @@ export {
   DEFAULT_THRESHOLDS,
   DEFAULT_HASH_ROUNDS,
   PROGRAM_ID,
-  PLANET_STATIC_FIELDS,
-  PLANET_DYNAMIC_FIELDS,
+  PLANET_STATE_FIELDS,
   PENDING_MOVE_DATA_FIELDS,
   MAX_FLUSH_BATCH,
   MAX_QUEUED_CALLBACKS,
@@ -218,6 +437,7 @@ export function getProviderAndProgram(): {
   provider: AnchorProvider;
   program: Program<EncryptedForest>;
 } {
+  patchAnchorSendAndConfirm();
   const rpcUrl = process.env.ANCHOR_PROVIDER_URL || DEFAULT_RPC_URL;
   const walletPath = process.env.ANCHOR_WALLET || DEFAULT_WALLET_PATH;
 
@@ -563,7 +783,12 @@ export function buildInitSpawnPlanetValues(
   playerId: bigint,
   sourcePlanetId: bigint
 ): bigint[] {
-  return [BigInt.asUintN(64, x), BigInt.asUintN(64, y), playerId, sourcePlanetId];
+  return [
+    BigInt.asUintN(64, x),
+    BigInt.asUintN(64, y),
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+  ];
 }
 
 export function buildProcessMoveValues(
@@ -577,10 +802,10 @@ export function buildProcessMoveValues(
   targetY: bigint
 ): bigint[] {
   return [
-    playerId,
-    sourcePlanetId,
-    shipsToSend,
-    metalToSend,
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+    BigInt.asUintN(32, shipsToSend),
+    BigInt.asUintN(32, metalToSend),
     BigInt.asUintN(64, sourceX),
     BigInt.asUintN(64, sourceY),
     BigInt.asUintN(64, targetX),
@@ -594,7 +819,12 @@ export function buildFlushPlanetValues(
   lastUpdatedSlot: bigint,
   flushCount: bigint
 ): bigint[] {
-  return [currentSlot, gameSpeed, lastUpdatedSlot, flushCount];
+  return [
+    BigInt.asUintN(32, currentSlot),
+    BigInt.asUintN(32, gameSpeed),
+    BigInt.asUintN(32, lastUpdatedSlot),
+    BigInt.asUintN(32, flushCount),
+  ];
 }
 
 export function buildUpgradePlanetValues(
@@ -605,7 +835,14 @@ export function buildUpgradePlanetValues(
   lastUpdatedSlot: bigint,
   metalUpgradeCost: bigint
 ): bigint[] {
-  return [playerId, BigInt(focus), currentSlot, gameSpeed, lastUpdatedSlot, metalUpgradeCost];
+  return [
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, BigInt(focus)),
+    BigInt.asUintN(32, currentSlot),
+    BigInt.asUintN(32, gameSpeed),
+    BigInt.asUintN(32, lastUpdatedSlot),
+    BigInt.asUintN(32, metalUpgradeCost),
+  ];
 }
 
 // ---------------------------------------------------------------------------

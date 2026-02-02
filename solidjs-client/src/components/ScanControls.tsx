@@ -4,6 +4,7 @@
 
 import { createSignal, type Accessor } from "solid-js";
 import type { FogOfWarStoreAPI } from "@encrypted-forest/solidjs-sdk";
+import DraggablePanel from "./DraggablePanel.js";
 import tui from "../styles/tui.module.css";
 
 interface ScanControlsProps {
@@ -28,24 +29,14 @@ export default function ScanControls(props: ScanControlsProps) {
   }
 
   return (
-    <div
-      class={tui.panel}
-      style={{
-        position: "fixed",
-        left: "16px",
-        top: "48px",
-        width: "240px",
-        padding: "12px",
-        "z-index": "200",
-        display: "flex",
-        "flex-direction": "column",
-        gap: "8px",
-      }}
+    <DraggablePanel
+      title="SCAN CONTROLS"
+      initialX={16}
+      initialY={48}
+      width="240px"
+      zIndex={200}
     >
-      <span class={tui.accent} style={{ "font-size": "13px", "font-weight": "600" }}>
-        SCAN CONTROLS
-      </span>
-
+      <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
       <div style={{ display: "flex", gap: "8px" }}>
         <div style={{ flex: "1" }}>
           <label class={tui.label}>X</label>
@@ -96,6 +87,7 @@ export default function ScanControls(props: ScanControlsProps) {
       >
         FIND SPAWN
       </button>
-    </div>
+      </div>
+    </DraggablePanel>
   );
 }

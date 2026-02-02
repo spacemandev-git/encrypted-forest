@@ -68,7 +68,7 @@ export interface MinerAPI {
 }
 
 const DEFAULT_CONFIG: MinerConfig = {
-  workerCount: navigator.hardwareConcurrency || 4,
+  workerCount: 1,
   chunkSize: 256,
   pattern: "spiral",
   centerX: 0,

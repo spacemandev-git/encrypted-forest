@@ -242,7 +242,7 @@ export class EncryptedForestClient {
   // -------------------------------------------------------------------------
 
   /**
-   * Decrypt both static and dynamic sections of an encrypted celestial body.
+   * Decrypt the full encrypted planet state.
    */
   decryptPlanetState(
     planetHash: Uint8Array,
@@ -252,7 +252,7 @@ export class EncryptedForestClient {
   }
 
   /**
-   * Decrypt only the static section of a celestial body.
+   * Decrypt only the static portion of the planet state.
    */
   decryptPlanetStatic(
     planetHash: Uint8Array,
@@ -260,14 +260,14 @@ export class EncryptedForestClient {
   ): PlanetStaticState {
     return decryptPlanetStatic(
       planetHash,
-      encAccount.staticEncPubkey,
-      encAccount.staticEncNonce,
-      encAccount.staticEncCiphertexts
+      encAccount.stateEncPubkey,
+      encAccount.stateEncNonce,
+      encAccount.stateEncCiphertexts
     );
   }
 
   /**
-   * Decrypt only the dynamic section of a celestial body.
+   * Decrypt only the dynamic portion of the planet state.
    */
   decryptPlanetDynamic(
     planetHash: Uint8Array,
@@ -275,9 +275,9 @@ export class EncryptedForestClient {
   ): PlanetDynamicState {
     return decryptPlanetDynamic(
       planetHash,
-      encAccount.dynamicEncPubkey,
-      encAccount.dynamicEncNonce,
-      encAccount.dynamicEncCiphertexts
+      encAccount.stateEncPubkey,
+      encAccount.stateEncNonce,
+      encAccount.stateEncCiphertexts
     );
   }
 

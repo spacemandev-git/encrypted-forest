@@ -374,6 +374,7 @@ export default function App() {
           {(entry) => (
             <PlanetPopup
               entry={entry()}
+              playerId={playerId()}
               onClose={() => setSelectedHash(null)}
             />
           )}

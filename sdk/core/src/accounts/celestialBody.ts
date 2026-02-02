@@ -15,16 +15,10 @@ function convertEncryptedCelestialBody(raw: any): EncryptedCelestialBodyAccount 
     planetHash: new Uint8Array(raw.planetHash),
     lastUpdatedSlot: BigInt(raw.lastUpdatedSlot.toString()),
     lastFlushedSlot: BigInt(raw.lastFlushedSlot.toString()),
-    // Static encryption section
-    staticEncPubkey: new Uint8Array(raw.staticEncPubkey),
-    staticEncNonce: new Uint8Array(raw.staticEncNonce),
-    staticEncCiphertexts: (raw.staticEncCiphertexts as any[]).map(
-      (ct: any) => new Uint8Array(ct)
-    ),
-    // Dynamic encryption section
-    dynamicEncPubkey: new Uint8Array(raw.dynamicEncPubkey),
-    dynamicEncNonce: new Uint8Array(raw.dynamicEncNonce),
-    dynamicEncCiphertexts: (raw.dynamicEncCiphertexts as any[]).map(
+    // State encryption section
+    stateEncPubkey: new Uint8Array(raw.stateEncPubkey),
+    stateEncNonce: new Uint8Array(raw.stateEncNonce),
+    stateEncCiphertexts: (raw.stateEncCiphertexts as any[]).map(
       (ct: any) => new Uint8Array(ct)
     ),
   };

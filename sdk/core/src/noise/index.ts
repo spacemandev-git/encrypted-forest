@@ -142,6 +142,17 @@ export function baseStats(
 ): CelestialBodyStats {
   const s = size;
   const sSq = s * s;
+  const pow2Ceil = (value: number): number => {
+    if (value <= 1) return 1;
+    if (value <= 2) return 2;
+    if (value <= 4) return 4;
+    if (value <= 8) return 8;
+    if (value <= 16) return 16;
+    if (value <= 32) return 32;
+    if (value <= 64) return 64;
+    if (value <= 128) return 128;
+    return 256;
+  };
 
   switch (bodyType) {
     case CelestialBodyType.Planet:
@@ -150,8 +161,8 @@ export function baseStats(
         shipGenSpeed: 1 * s,
         maxMetalCapacity: 0,
         metalGenSpeed: 0,
-        range: 3 + s,
-        launchVelocity: 1 + s,
+        range: pow2Ceil(3 + s),
+        launchVelocity: pow2Ceil(1 + s),
         nativeShips: size === 1 ? 0 : 10 * s,
       };
     case CelestialBodyType.Quasar:
@@ -160,8 +171,8 @@ export function baseStats(
         shipGenSpeed: 0,
         maxMetalCapacity: 500 * sSq,
         metalGenSpeed: 0,
-        range: 2 + s,
-        launchVelocity: 1 + s,
+        range: pow2Ceil(2 + s),
+        launchVelocity: pow2Ceil(1 + s),
         nativeShips: 20 * s,
       };
     case CelestialBodyType.SpacetimeRip:
@@ -170,8 +181,8 @@ export function baseStats(
         shipGenSpeed: 1 * s,
         maxMetalCapacity: 0,
         metalGenSpeed: 0,
-        range: 2 + s,
-        launchVelocity: 1 + s,
+        range: pow2Ceil(2 + s),
+        launchVelocity: pow2Ceil(1 + s),
         nativeShips: 15 * s,
       };
     case CelestialBodyType.AsteroidBelt:
@@ -180,8 +191,8 @@ export function baseStats(
         shipGenSpeed: 0,
         maxMetalCapacity: 200 * sSq,
         metalGenSpeed: 2 * s,
-        range: 2 + s,
-        launchVelocity: 1 + s,
+        range: pow2Ceil(2 + s),
+        launchVelocity: pow2Ceil(1 + s),
         nativeShips: 10 * s,
       };
   }

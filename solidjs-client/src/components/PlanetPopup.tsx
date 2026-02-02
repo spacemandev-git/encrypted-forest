@@ -1,12 +1,15 @@
 /**
- * Popup panel showing details of a selected planet.
+ * Draggable popup panel showing full details of a selected planet.
+ * Shows discovery data always, plus decrypted on-chain state when available.
  */
 
 import { Show } from "solid-js";
 import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
+import DraggablePanel from "./DraggablePanel.js";
 import tui from "../styles/tui.module.css";
 
 const BODY_TYPE_NAMES = ["Planet", "Quasar", "Spacetime Rift", "Asteroid Belt"];
+const SIZE_NAMES = ["", "Miniscule", "Tiny", "Small", "Medium", "Large", "Gargantuan"];
 const COMET_NAMES: Record<number, string> = {
   1: "Ship Capacity",
   2: "Metal Capacity",
@@ -18,125 +21,140 @@ const COMET_NAMES: Record<number, string> = {
 
 interface PlanetPopupProps {
   entry: PlanetEntry;
+  playerId?: bigint | null;
   onClose: () => void;
+}
+
+function Row(props: { label: string; value: string; highlight?: boolean; warning?: boolean; success?: boolean; dim?: boolean }) {
+  return (
+    <div style={{ display: "flex", "justify-content": "space-between", padding: "1px 0" }}>
+      <span class={tui.dim} style={{ "font-size": "11px" }}>{props.label}</span>
+      <span
+        class={
+          props.warning ? tui.valueWarning
+            : props.success ? tui.valueSuccess
+            : props.highlight ? tui.valueHighlight
+            : props.dim ? tui.dim
+            : tui.value
+        }
+        style={{ "font-size": "11px" }}
+      >
+        {props.value}
+      </span>
+    </div>
+  );
 }
 
 export default function PlanetPopup(props: PlanetPopupProps) {
   const d = () => props.entry.discovery;
   const p = () => d().properties;
+  const dec = () => props.entry.decrypted;
+
+  const isOwned = () => {
+    const state = dec();
+    const pid = props.playerId;
+    if (!state || state.dynamic.ownerExists === 0 || pid == null) return false;
+    return state.dynamic.ownerId === pid;
+  };
+
+  const isEnemy = () => {
+    const state = dec();
+    const pid = props.playerId;
+    if (!state || state.dynamic.ownerExists === 0) return false;
+    if (pid == null) return true;
+    return state.dynamic.ownerId !== pid;
+  };
 
   return (
-    <div
-      class={tui.panel}
-      style={{
-        position: "fixed",
-        top: "50%",
-        right: "12px",
-        transform: "translateY(-50%)",
-        width: "240px",
-        padding: "16px",
-        "z-index": "50",
-        display: "flex",
-        "flex-direction": "column",
-        gap: "10px",
-        "font-size": "12px",
-      }}
+    <DraggablePanel
+      title={BODY_TYPE_NAMES[p().bodyType] ?? "Unknown"}
+      initialX={window.innerWidth - 310}
+      initialY={80}
+      width="280px"
+      zIndex={200}
+      onClose={props.onClose}
     >
-      {/* Header */}
-      <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>
-        <span class={tui.accent} style={{ "font-weight": "600", "font-size": "13px" }}>
-          {BODY_TYPE_NAMES[p().bodyType] ?? "Unknown"}
-        </span>
-        <button
-          class={tui.button}
-          onClick={props.onClose}
-          style={{ padding: "1px 6px", "font-size": "10px" }}
-        >
-          X
-        </button>
-      </div>
+      <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "font-size": "12px" }}>
+        {/* -- Discovery Data (always available) -- */}
+        <div class={tui.label} style={{ "font-size": "10px", "letter-spacing": "1.5px" }}>DISCOVERY</div>
+        <Row label="Location" value={`${d().x.toString()}, ${d().y.toString()}`} />
+        <Row label="Type" value={BODY_TYPE_NAMES[p().bodyType] ?? "Unknown"} highlight />
+        <Row label="Size" value={`${SIZE_NAMES[p().size] ?? "?"} (${p().size}/6)`} />
 
-      {/* Coordinates */}
-      <div>
-        <span class={tui.label}>LOCATION</span>
+        {/* Comets */}
+        <Show when={p().comets.length > 0}>
+          {p().comets.map((c: number) => (
+            <Row label="Comet" value={`+${COMET_NAMES[c] ?? `Boost ${c}`}`} success />
+          ))}
+        </Show>
+
+        {/* Hash */}
         <div style={{ "margin-top": "2px" }}>
-          <span class={tui.dim}>x:</span>{" "}
-          <span class={tui.value}>{d().x.toString()}</span>
-          <span class={tui.dim} style={{ "margin-left": "8px" }}>y:</span>{" "}
-          <span class={tui.value}>{d().y.toString()}</span>
+          <span class={tui.dim} style={{ "font-size": "9px", "word-break": "break-all", "line-height": "1.3" }}>
+            {props.entry.hashHex}
+          </span>
         </div>
-      </div>
 
-      {/* Size */}
-      <div>
-        <span class={tui.label}>SIZE</span>
-        <div style={{ "margin-top": "2px" }}>
-          <span class={tui.valueHighlight}>{p().size}</span>
-          <span class={tui.dim}> / 6</span>
-        </div>
-      </div>
+        {/* -- On-Chain State -- */}
+        <div style={{ "border-top": "1px solid #333333", margin: "4px 0" }} />
 
-      {/* Hash */}
-      <div>
-        <span class={tui.label}>HASH</span>
-        <div
-          style={{
-            "margin-top": "2px",
-            "font-size": "9px",
-            color: "#777777",
-            "word-break": "break-all",
-            "line-height": "1.3",
-          }}
+        <Show
+          when={dec() != null}
+          fallback={
+            <div class={tui.dim} style={{ "font-size": "10px", "text-align": "center", padding: "4px 0" }}>
+              Not initialized on-chain
+            </div>
+          }
         >
-          {props.entry.hashHex}
-        </div>
-      </div>
+          {(() => {
+            const state = dec()!;
+            const ownership = state.dynamic.ownerExists
+              ? isOwned() ? "YOU" : "ENEMY"
+              : "NEUTRAL";
 
-      {/* Comets */}
-      <Show when={p().comets.length > 0}>
-        <div>
-          <span class={tui.label}>COMET BOOSTS</span>
-          <div style={{ "margin-top": "2px", display: "flex", "flex-direction": "column", gap: "2px" }}>
-            {p().comets.map((c: number) => (
-              <span class={tui.valueSuccess} style={{ "font-size": "11px" }}>
-                + {COMET_NAMES[c] ?? `Boost ${c}`}
-              </span>
-            ))}
+            return (
+              <>
+                <div class={tui.label} style={{ "font-size": "10px", "letter-spacing": "1.5px" }}>ON-CHAIN STATE</div>
+
+                {/* Ownership */}
+                <Row
+                  label="Owner"
+                  value={ownership}
+                  success={isOwned()}
+                  warning={isEnemy()}
+                  dim={!state.dynamic.ownerExists}
+                />
+
+                {/* Dynamic */}
+                <Row label="Ships" value={state.dynamic.shipCount.toString()} />
+                <Row label="Metal" value={state.dynamic.metalCount.toString()} />
+
+                {/* Static */}
+                <div style={{ "border-top": "1px dashed #222222", margin: "3px 0" }} />
+                <div class={tui.label} style={{ "font-size": "10px", "letter-spacing": "1.5px" }}>STATS</div>
+                <Row label="Max Ships" value={state.static.maxShipCapacity.toString()} />
+                <Row label="Ship Gen" value={state.static.shipGenSpeed.toString()} />
+                <Row label="Max Metal" value={state.static.maxMetalCapacity.toString()} />
+                <Row label="Metal Gen" value={state.static.metalGenSpeed.toString()} />
+                <Row label="Range" value={state.static.range.toString()} />
+                <Row label="Velocity" value={state.static.launchVelocity.toString()} />
+                <Row label="Level" value={state.static.level.toString()} />
+              </>
+            );
+          })()}
+        </Show>
+
+        {/* -- Raw Encrypted Account (when available but not decoded, or as debug info) -- */}
+        <Show when={props.entry.encrypted != null && dec() == null}>
+          <div style={{ "border-top": "1px solid #333333", margin: "4px 0" }} />
+          <div class={tui.label} style={{ "font-size": "10px", "letter-spacing": "1.5px" }}>RAW ACCOUNT</div>
+          <Row label="Last Updated" value={props.entry.encrypted!.lastUpdatedSlot.toString()} dim />
+          <Row label="Last Flushed" value={props.entry.encrypted!.lastFlushedSlot.toString()} dim />
+          <div class={tui.dim} style={{ "font-size": "9px", "margin-top": "2px" }}>
+            Encrypted state present but not yet decrypted
           </div>
-        </div>
-      </Show>
-
-      {/* On-chain state (if decrypted) */}
-      <Show when={props.entry.decrypted != null}>
-        {(() => {
-          const state = props.entry.decrypted!;
-          return (
-            <>
-              <div style={{ "border-top": "1px solid #333333", margin: "2px 0" }} />
-              <div>
-                <span class={tui.label}>ON-CHAIN STATE</span>
-                <div style={{ "margin-top": "4px", display: "grid", "grid-template-columns": "1fr 1fr", gap: "4px 12px", "font-size": "11px" }}>
-                  <span class={tui.dim}>Ships</span>
-                  <span class={tui.value}>{state.dynamic.shipCount.toString()}</span>
-                  <span class={tui.dim}>Metal</span>
-                  <span class={tui.value}>{state.dynamic.metalCount.toString()}</span>
-                  <span class={tui.dim}>Owner</span>
-                  <span class={tui.value}>
-                    {state.dynamic.ownerExists ? "Yes" : "None"}
-                  </span>
-                </div>
-              </div>
-            </>
-          );
-        })()}
-      </Show>
-
-      <Show when={props.entry.decrypted == null}>
-        <div style={{ "border-top": "1px solid #333333", margin: "2px 0" }} />
-        <div class={tui.dim} style={{ "font-size": "10px" }}>
-          Not yet initialized on-chain
-        </div>
-      </Show>
-    </div>
+        </Show>
+      </div>
+    </DraggablePanel>
   );
 }

@@ -4,12 +4,11 @@
  * Queues an Arcium process_move computation to send ships from a source
  * planet to a target planet.
  *
- * Planet state (static + dynamic) is read by MPC nodes directly from the
- * source_body account via .account() -- NOT passed as ciphertexts.
+ * Planet state and move input are passed inline as ciphertexts.
  *
- * Encrypted input: Enc<Shared, ProcessMoveInput> = 8 ciphertexts:
- *   player_id, source_planet_id, ships_to_send, metal_to_send,
- *   source_x, source_y, target_x, target_y
+ * Encrypted input: Enc<Shared, ProcessMoveInputPacked> = 2 ciphertexts (Pack<[u32;8]>):
+ *   Packed fields: player_id, source_planet_id, ships_to_send, metal_to_send,
+ *   source_x, source_y, target_x, target_y (coords biased by 2^31)
  *
  * Plaintext params (computed on-chain from lazy generation):
  *   current_ships, current_metal, current_slot, game_speed
@@ -31,14 +30,12 @@ export interface QueueProcessMoveArgs {
   currentShips: bigint;
   /** Client-computed current metal count (lazy generation from on-chain state) */
   currentMetal: bigint;
-  /** 8 ciphertexts packed as Vec<u8> (8 * 32 = 256 bytes) */
+  /** 2 ciphertexts packed as Vec<u8> (2 * 32 = 64 bytes) — Pack<[u32;8]> */
   moveCts: Uint8Array;
   /** x25519 pubkey for Enc<Shared, ProcessMoveInput> */
   movePubkey: Uint8Array;
   /** Nonce for the move encryption (u128) */
   moveNonce: bigint;
-  /** Observer x25519 public key */
-  observerPubkey: Uint8Array;
   /** Source celestial body account address */
   sourceBody: PublicKey;
   /** Source planet's pending moves metadata (read-only, for flush check) */
@@ -68,8 +65,7 @@ export function buildQueueProcessMoveIx(
       new BN(args.currentMetal.toString()),
       Buffer.from(args.moveCts),
       Array.from(args.movePubkey) as any,
-      new BN(args.moveNonce.toString()),
-      Array.from(args.observerPubkey) as any
+      new BN(args.moveNonce.toString())
     )
     .accounts({
       payer,

@@ -29,8 +29,7 @@ export {
   CelestialBodyType,
   CometBoost,
   UpgradeFocus,
-  PLANET_STATIC_FIELDS,
-  PLANET_DYNAMIC_FIELDS,
+  PLANET_STATE_FIELDS,
 } from "./types/celestialBody.js";
 
 export type { Player } from "./types/player.js";

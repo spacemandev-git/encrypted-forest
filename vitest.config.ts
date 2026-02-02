@@ -6,8 +6,10 @@ export default defineConfig({
       "tests/**/*.test.ts",
       "sdk/core/src/**/*.test.ts",
     ],
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
     pool: "threads",
+    maxWorkers: 1,
+    maxConcurrency: 1,
   },
 });

@@ -5,6 +5,7 @@
 import { createSignal, For, Show } from "solid-js";
 import type { MinerAPI } from "../mining/miner.js";
 import { PATTERN_DESCRIPTIONS, type ScanPattern } from "../mining/patterns.js";
+import DraggablePanel from "./DraggablePanel.js";
 import tui from "../styles/tui.module.css";
 
 const PATTERNS: ScanPattern[] = ["spiral", "checkerboard", "ring", "quadrant", "random"];
@@ -49,26 +50,15 @@ export default function MinerControls(props: MinerControlsProps) {
   }
 
   return (
-    <div
-      class={tui.panel}
-      style={{
-        position: "fixed",
-        left: "16px",
-        top: "48px",
-        width: "300px",
-        padding: "12px",
-        "z-index": "200",
-        display: "flex",
-        "flex-direction": "column",
-        gap: "8px",
-        "max-height": "calc(100vh - 100px)",
-        "overflow-y": "auto",
-      }}
+    <DraggablePanel
+      title="HASH MINER"
+      initialX={16}
+      initialY={48}
+      width="300px"
+      zIndex={200}
+      maxHeight="calc(100vh - 60px)"
     >
-      <span class={tui.accent} style={{ "font-size": "14px", "font-weight": "600" }}>
-        HASH MINER
-      </span>
-
+      <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
       {/* Status bar */}
       <div
         style={{
@@ -270,6 +260,7 @@ export default function MinerControls(props: MinerControlsProps) {
           </div>
         </Show>
       </Show>
-    </div>
+      </div>
+    </DraggablePanel>
   );
 }

@@ -17,8 +17,7 @@ declare_id!("8BscA3fCxbBTkNCNHSopiQ84Q4A58YYzvQkqwbUM7wqA");
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const PLANET_STATIC_FIELDS: usize = 4;   // Pack<[u64;11]> = 88 bytes => ceil(88/26) = 4 FEs
-const PLANET_DYNAMIC_FIELDS: usize = 2;  // Pack<[u64;4]>  = 32 bytes => ceil(32/26) = 2 FEs
+const PLANET_STATE_FIELDS: usize = 3;   // Pack<[u32;15]> = 60 bytes => ceil(60/26) = 3 FEs
 const PENDING_MOVE_DATA_FIELDS: usize = 4;
 
 // Base size for PendingMovesMetadata:
@@ -31,37 +30,15 @@ const PENDING_MOVE_ENTRY_SIZE: usize = 16;
 const MAX_QUEUED_CALLBACKS: usize = 8;
 
 // ---------------------------------------------------------------------------
-// Account byte offsets for ArgBuilder .account() reads
-// MPC nodes read encrypted data directly from on-chain accounts at these offsets.
+// Account byte offsets for reading encrypted data from on-chain accounts
 // ---------------------------------------------------------------------------
 
-// EncryptedCelestialBody layout (after 8-byte Anchor discriminator):
-//   planet_hash[32] + last_updated_slot(8) + last_flushed_slot(8) = 48 bytes
-//   --- Static Section (176 bytes) ---
-//   static_enc_pubkey[32] starts at discriminator(8) + 48 = offset 56
-//   static_enc_nonce[16] at offset 88
-//   static_enc_ciphertexts[4*32] at offset 104
-//   --- Dynamic Section (112 bytes) ---
-//   dynamic_enc_pubkey[32] starts at offset 56 + 176 = 232
-//   dynamic_enc_nonce[16] at offset 264
-//   dynamic_enc_ciphertexts[2*32] at offset 280
-//
-// NOTE: ArgBuilder .account() requires length to be a multiple of 32.
-// The full encrypted sections (pubkey[32] + nonce[16] + cts[N*32]) are NOT
-// 32-byte aligned due to the 16-byte nonce. So we pass pubkey + nonce via
-// individual ArgBuilder calls and use .account() only for the ciphertexts.
-const STATIC_CT_OFFSET: u32 = 56 + 32 + 16;                       // = 104
-const STATIC_CT_SIZE: u32 = (PLANET_STATIC_FIELDS as u32) * 32;   // = 128
-const DYNAMIC_CT_OFFSET: u32 = 56 + 176 + 32 + 16;               // = 280
-const DYNAMIC_CT_SIZE: u32 = (PLANET_DYNAMIC_FIELDS as u32) * 32; // = 64
-
 // PendingMoveAccount layout (after 8-byte discriminator):
-//   game_id(8) + planet_hash(32) + move_id(8) + landing_slot(8) + payer(32) = 88 bytes
-//   enc_nonce(16) starts at offset 96
-//   enc_ciphertexts[4*32] at offset 112
-const MOVE_ACCOUNT_ENC_NONCE_OFFSET: usize = 96;
-const MOVE_CT_OFFSET: u32 = 112;
-const MOVE_CT_SIZE: u32 = (PENDING_MOVE_DATA_FIELDS as u32) * 32; // = 128
+//   game_id(8) + planet_hash(32) + move_id(8) + landing_slot(8) + payer(32) + populated(1) = 89 bytes
+//   enc_nonce(16) starts at offset 97
+//   enc_ciphertexts[4*32] at offset 113
+const MOVE_ACCOUNT_ENC_NONCE_OFFSET: usize = 97;
+const MOVE_CT_OFFSET: u32 = 113;
 
 // ---------------------------------------------------------------------------
 // Hash helper
@@ -250,7 +227,7 @@ pub mod encrypted_forest {
     // Queue init_planet
     // Encrypted: CoordInput (x, y) = 2 * 32 bytes
     // Plaintext: game_id + 9 thresholds sourced from Game account
-    // Output: (PlanetStatic, PlanetDynamic, InitPlanetRevealed)
+    // Output: (PlanetState, InitPlanetRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_init_planet(
@@ -303,7 +280,7 @@ pub mod encrypted_forest {
             .plaintext_u64(nt.size_threshold_3 as u64)
             .plaintext_u64(nt.size_threshold_4 as u64)
             .plaintext_u64(nt.size_threshold_5 as u64)
-            // Planet key (Shared handle for PlanetDynamic output encryption)
+            // Planet key (Shared handle for PlanetState output encryption)
             .x25519_pubkey(pubkey)
             .plaintext_u128(0u128)
             // Observer (Shared handle for revealed output encryption)
@@ -348,29 +325,19 @@ pub mod encrypted_forest {
             }
         };
 
-        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, InitPlanetRevealed>)
-        let enc_static = &o.field_0.field_0;
-        let enc_dynamic = &o.field_0.field_1;
-        let revealed = &o.field_0.field_2;
+        // Output tuple: (Enc<Shared, PlanetState>, Enc<Shared, InitPlanetRevealed>)
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
 
         let planet = &mut ctx.accounts.celestial_body;
 
-        // Write static section
-        planet.static_enc_pubkey = enc_static.encryption_key;
-        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
+        // Write state section
+        planet.state_enc_pubkey = enc_state.encryption_key;
+        planet.state_enc_nonce = enc_state.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATIC_FIELDS {
-            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
+        while i < PLANET_STATE_FIELDS {
+            planet.state_enc_ciphertexts[i] = enc_state.ciphertexts[i];
             i += 1;
-        }
-
-        // Write dynamic section
-        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
-        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
-        let mut j = 0;
-        while j < PLANET_DYNAMIC_FIELDS {
-            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
-            j += 1;
         }
 
         planet.last_updated_slot = Clock::get()?.slot;
@@ -389,7 +356,7 @@ pub mod encrypted_forest {
     // Queue init_spawn_planet
     // Encrypted: SpawnInput (x, y, player_id, source_planet_id) = 4 * 32 bytes
     // Plaintext: game_id + 9 thresholds sourced from Game account
-    // Output: (PlanetStatic, PlanetDynamic, SpawnPlanetRevealed)
+    // Output: (PlanetState, SpawnPlanetRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_init_spawn_planet(
@@ -433,8 +400,8 @@ pub mod encrypted_forest {
             .plaintext_u128(nonce)
             .encrypted_u64(extract_ct(&ciphertexts, 0))   // x
             .encrypted_u64(extract_ct(&ciphertexts, 1))   // y
-            .encrypted_u64(extract_ct(&ciphertexts, 2))   // player_id
-            .encrypted_u64(extract_ct(&ciphertexts, 3))   // source_planet_id
+            .encrypted_u32(extract_ct(&ciphertexts, 2))   // player_id
+            .encrypted_u32(extract_ct(&ciphertexts, 3))   // source_planet_id
             // Plaintext params from Game account
             .plaintext_u64(game.game_id)
             .plaintext_u64(nt.dead_space_threshold as u64)
@@ -446,7 +413,7 @@ pub mod encrypted_forest {
             .plaintext_u64(nt.size_threshold_3 as u64)
             .plaintext_u64(nt.size_threshold_4 as u64)
             .plaintext_u64(nt.size_threshold_5 as u64)
-            // Planet key (Shared handle for PlanetDynamic output encryption)
+            // Planet key (Shared handle for PlanetState output encryption)
             .x25519_pubkey(pubkey)
             .plaintext_u128(0u128)
             // Observer (Shared handle for revealed output encryption)
@@ -498,29 +465,19 @@ pub mod encrypted_forest {
             }
         };
 
-        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, SpawnPlanetRevealed>)
-        let enc_static = &o.field_0.field_0;
-        let enc_dynamic = &o.field_0.field_1;
-        let revealed = &o.field_0.field_2;
+        // Output tuple: (Enc<Shared, PlanetState>, Enc<Shared, SpawnPlanetRevealed>)
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
 
         let planet = &mut ctx.accounts.celestial_body;
 
-        // Write static section
-        planet.static_enc_pubkey = enc_static.encryption_key;
-        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
+        // Write state section
+        planet.state_enc_pubkey = enc_state.encryption_key;
+        planet.state_enc_nonce = enc_state.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATIC_FIELDS {
-            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
+        while i < PLANET_STATE_FIELDS {
+            planet.state_enc_ciphertexts[i] = enc_state.ciphertexts[i];
             i += 1;
-        }
-
-        // Write dynamic section
-        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
-        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
-        let mut j = 0;
-        while j < PLANET_DYNAMIC_FIELDS {
-            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
-            j += 1;
         }
 
         planet.last_updated_slot = Clock::get()?.slot;
@@ -540,9 +497,9 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue process_move
-    // Planet state (static + dynamic) read via .account() from source_body.
-    // move_cts = 11 * 32 bytes.
-    // Output: (PlanetDynamic, PendingMoveData, MoveRevealed)
+    // Planet state + move input passed inline as ciphertexts.
+    // move_cts = 2 * 32 bytes (Pack<[u32; 8]> = 2 FEs).
+    // Output: (PlanetState, PendingMoveData, MoveRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_process_move(
@@ -551,12 +508,11 @@ pub mod encrypted_forest {
         landing_slot: u64,        // public: client-computed, MPC-validated
         current_ships: u64,       // plaintext: client-computed lazy resource generation
         current_metal: u64,       // plaintext: client-computed lazy resource generation
-        move_cts: Vec<u8>,        // 8 * 32 = 256 bytes
+        move_cts: Vec<u8>,        // 2 * 32 = 64 bytes (Pack<[u32;8]>)
         move_pubkey: [u8; 32],
         move_nonce: u128,
-        observer_pubkey: [u8; 32],
     ) -> Result<()> {
-        require!(move_cts.len() == 8 * 32, ErrorCode::InvalidMoveInput);
+        require!(move_cts.len() == 2 * 32, ErrorCode::InvalidMoveInput);
 
         let game = &ctx.accounts.game;
         let clock = Clock::get()?;
@@ -575,89 +531,83 @@ pub mod encrypted_forest {
             );
         }
 
-        // Push landing_slot into target's FIFO buffer for the callback
+        // Directly insert PendingMoveEntry into target's moves Vec (sorted by landing_slot).
+        // This is done here (before MPC) so the callback only needs source_body + move_account.
+        // The move_account.populated flag ensures flush skips moves with incomplete MPC.
         let target_pending = &mut ctx.accounts.target_pending;
-        require!(
-            (target_pending.queued_count as usize) < MAX_QUEUED_CALLBACKS,
-            ErrorCode::TooManyPendingMoves
-        );
-        let qc = target_pending.queued_count as usize;
-        let predicted_move_id = target_pending.next_move_id + qc as u64;
-        target_pending.queued_landing_slots[qc] = landing_slot;
-        target_pending.queued_count += 1;
+        let move_id = target_pending.next_move_id;
+        target_pending.next_move_id = move_id + 1;
 
-        // Initialize PendingMoveAccount (enc_nonce + enc_ciphertexts written by callback)
+        let entry = PendingMoveEntry { landing_slot, move_id };
+        let pos = target_pending.moves
+            .binary_search_by_key(&landing_slot, |e| e.landing_slot)
+            .unwrap_or_else(|e| e);
+        target_pending.moves.insert(pos, entry);
+        target_pending.move_count = target_pending.moves.len() as u16;
+
+        // Initialize PendingMoveAccount (enc data written by MPC callback)
         let move_acc = &mut ctx.accounts.move_account;
         move_acc.game_id = target_pending.game_id;
         move_acc.planet_hash = target_pending.planet_hash;
-        move_acc.move_id = predicted_move_id;
+        move_acc.move_id = move_id;
         move_acc.landing_slot = landing_slot;
         move_acc.payer = ctx.accounts.payer.key();
+        move_acc.populated = false; // set to true by callback after MPC completes
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // Enc<Shared, PlanetStatic> — pubkey + nonce passed individually, ciphertexts via .account()
-        // Enc<Shared, PlanetDynamic> — same pattern
+        // Enc<Shared, PlanetState> — all inline
+        // planet_input.owner re-encrypts output (no separate planet_key needed)
         let source = &ctx.accounts.source_body;
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(source.static_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(source.static_enc_nonce))
-            .account(source.key(), STATIC_CT_OFFSET, STATIC_CT_SIZE)
-            .x25519_pubkey(source.dynamic_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(source.dynamic_enc_nonce))
-            .account(source.key(), DYNAMIC_CT_OFFSET, DYNAMIC_CT_SIZE);
+            .x25519_pubkey(source.state_enc_pubkey)
+            .plaintext_u128(u128::from_le_bytes(source.state_enc_nonce))
+            .encrypted_u32(source.state_enc_ciphertexts[0])  // Pack FE 0
+            .encrypted_u32(source.state_enc_ciphertexts[1])  // Pack FE 1
+            .encrypted_u32(source.state_enc_ciphertexts[2]); // Pack FE 2
 
-        // Enc<Shared, ProcessMoveInput> (8 fields — no slot/speed/last_updated)
+        // Enc<Shared, ProcessMoveInputPacked> — all inline (2 packed FEs)
+        // move_input.owner encrypts revealed output (no separate observer needed)
         builder = builder
             .x25519_pubkey(move_pubkey)
             .plaintext_u128(move_nonce)
-            .encrypted_u64(extract_ct(&move_cts, 0))   // player_id
-            .encrypted_u64(extract_ct(&move_cts, 1))   // source_planet_id
-            .encrypted_u64(extract_ct(&move_cts, 2))   // ships_to_send
-            .encrypted_u64(extract_ct(&move_cts, 3))   // metal_to_send
-            .encrypted_u64(extract_ct(&move_cts, 4))   // source_x
-            .encrypted_u64(extract_ct(&move_cts, 5))   // source_y
-            .encrypted_u64(extract_ct(&move_cts, 6))   // target_x
-            .encrypted_u64(extract_ct(&move_cts, 7));   // target_y
+            .encrypted_u32(extract_ct(&move_cts, 0))  // Pack FE 0
+            .encrypted_u32(extract_ct(&move_cts, 1)); // Pack FE 1
 
         // Plaintext params: lazy-generation computed client-side
+        // NOTE: Use plaintext_u64 (not u32) because Arcium allocates comp account space
+        // based on the comp_def parameter types. u32 reserves less space than actual storage.
         builder = builder
             .plaintext_u64(current_ships)
             .plaintext_u64(current_metal)
             .plaintext_u64(clock.slot)
-            .plaintext_u64(game.game_speed)
-            // Observer (Shared handle for revealed output encryption)
-            .x25519_pubkey(observer_pubkey)
-            .plaintext_u128(0u128);
+            .plaintext_u64(game.game_speed);
 
         let args = builder.build();
 
         let source_body_pda = ctx.accounts.source_body.key();
-        let target_pending_pda = ctx.accounts.target_pending.key();
         let move_account_pda = ctx.accounts.move_account.key();
+
+        let callbacks = vec![ProcessMoveCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[
+                CallbackAccount {
+                    pubkey: source_body_pda,
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: move_account_pda,
+                    is_writable: true,
+                },
+            ],
+        )?];
 
         queue_computation(
             ctx.accounts,
             computation_offset,
             args,
-            vec![ProcessMoveCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[
-                    CallbackAccount {
-                        pubkey: source_body_pda,
-                        is_writable: true,
-                    },
-                    CallbackAccount {
-                        pubkey: target_pending_pda,
-                        is_writable: true,
-                    },
-                    CallbackAccount {
-                        pubkey: move_account_pda,
-                        is_writable: true,
-                    },
-                ],
-            )?],
+            callbacks,
             1,
             0,
         )?;
@@ -681,48 +631,22 @@ pub mod encrypted_forest {
             }
         };
 
-        // Output tuple: (Enc<Shared, PlanetDynamic>, Enc<Mxe, PendingMoveData>, Enc<Shared, MoveRevealed>)
-        let enc_dynamic = &o.field_0.field_0;
+        // Output tuple: (Enc<Shared, PlanetState>, Enc<Mxe, PendingMoveData>)
+        let enc_state = &o.field_0.field_0;
         let enc_move_data = &o.field_0.field_1;
-        let revealed = &o.field_0.field_2;
 
-        // Update source planet — ONLY dynamic section
+        // Update source planet
         let source = &mut ctx.accounts.source_body;
-        source.dynamic_enc_pubkey = enc_dynamic.encryption_key;
-        source.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
+        source.state_enc_pubkey = enc_state.encryption_key;
+        source.state_enc_nonce = enc_state.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_DYNAMIC_FIELDS {
-            source.dynamic_enc_ciphertexts[i] = enc_dynamic.ciphertexts[i];
+        while i < PLANET_STATE_FIELDS {
+            source.state_enc_ciphertexts[i] = enc_state.ciphertexts[i];
             i += 1;
         }
         source.last_updated_slot = Clock::get()?.slot;
 
-        // Pop landing_slot from the FIFO buffer (was pushed by queue_process_move)
-        let target_pending = &mut ctx.accounts.target_pending;
-        require!(target_pending.queued_count > 0, ErrorCode::InvalidMoveInput);
-        let landing_slot = target_pending.queued_landing_slots[0];
-        // Shift FIFO left
-        let qc = target_pending.queued_count as usize;
-        for j in 1..qc {
-            target_pending.queued_landing_slots[j - 1] = target_pending.queued_landing_slots[j];
-        }
-        target_pending.queued_landing_slots[qc - 1] = 0;
-        target_pending.queued_count -= 1;
-
-        // Sorted insert into moves array
-        let move_id = target_pending.next_move_id;
-        let entry = PendingMoveEntry {
-            landing_slot,
-            move_id,
-        };
-        let pos = target_pending.moves
-            .binary_search_by_key(&landing_slot, |e| e.landing_slot)
-            .unwrap_or_else(|e| e);
-        target_pending.moves.insert(pos, entry);
-        target_pending.move_count = target_pending.moves.len() as u16;
-        target_pending.next_move_id = move_id + 1;
-
-        // Store Enc<Mxe, PendingMoveData> in the PendingMoveAccount
+        // Store Enc<Mxe, PendingMoveData> in the PendingMoveAccount and mark populated
         let move_acc = &mut ctx.accounts.move_account;
         move_acc.enc_nonce = enc_move_data.nonce;
         let mut ci = 0;
@@ -730,24 +654,16 @@ pub mod encrypted_forest {
             move_acc.enc_ciphertexts[ci] = enc_move_data.ciphertexts[ci];
             ci += 1;
         }
-
-        emit!(ProcessMoveEvent {
-            encrypted_landing_slot: revealed.ciphertexts[0],
-            encrypted_surviving_ships: revealed.ciphertexts[1],
-            encrypted_valid: revealed.ciphertexts[2],
-            encryption_key: revealed.encryption_key,
-            nonce: revealed.nonce.to_le_bytes(),
-        });
+        move_acc.populated = true;
 
         Ok(())
     }
 
     // -----------------------------------------------------------------------
     // Queue flush_planet (single move)
-    // Planet state (static + dynamic) read via .account() from celestial_body.
-    // Move data read via .account() from PendingMoveAccount PDA (remaining_accounts[0]).
+    // Planet state + move data passed inline as ciphertexts.
     // flush_timing_cts = 4 * 32 (FlushTimingInput: current_slot, game_speed, last_updated_slot, flush_count)
-    // Output: Enc<Shared, PlanetDynamic> — only dynamic section
+    // Output: Enc<Shared, PlanetState>
     // -----------------------------------------------------------------------
 
     pub fn queue_flush_planet(
@@ -791,45 +707,53 @@ pub mod encrypted_forest {
             ErrorCode::FlushFailed
         );
 
+        // Ensure move_account has been populated by the MPC callback
+        {
+            let acc_data = ctx.remaining_accounts[0].try_borrow_data()?;
+            let populated = acc_data[96]; // offset of `populated` field
+            require!(populated == 1, ErrorCode::FlushFailed);
+        }
+
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // Enc<Shared, PlanetStatic> — pubkey + nonce passed individually, ciphertexts via .account()
-        // Enc<Shared, PlanetDynamic> — same pattern
+        // Enc<Shared, PlanetState> — all inline
         let body = &ctx.accounts.celestial_body;
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(body.static_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(body.static_enc_nonce))
-            .account(body.key(), STATIC_CT_OFFSET, STATIC_CT_SIZE)
-            .x25519_pubkey(body.dynamic_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(body.dynamic_enc_nonce))
-            .account(body.key(), DYNAMIC_CT_OFFSET, DYNAMIC_CT_SIZE);
+            .x25519_pubkey(body.state_enc_pubkey)
+            .plaintext_u128(u128::from_le_bytes(body.state_enc_nonce))
+            .encrypted_u32(body.state_enc_ciphertexts[0])  // Pack FE 0
+            .encrypted_u32(body.state_enc_ciphertexts[1])  // Pack FE 1
+            .encrypted_u32(body.state_enc_ciphertexts[2]); // Pack FE 2
 
-        // Single move slot: read from PendingMoveAccount
-        // Enc<Mxe, T> has nonce + ciphertexts (no pubkey). Read nonce from raw account data,
-        // pass via .plaintext_u128(), then .account() for ciphertexts only.
+        // Enc<Mxe, PendingMoveData> — nonce + 4 ciphertexts read from PendingMoveAccount
         {
             let acc_data = ctx.remaining_accounts[0].try_borrow_data()?;
             let nonce_bytes: [u8; 16] = acc_data[MOVE_ACCOUNT_ENC_NONCE_OFFSET..MOVE_ACCOUNT_ENC_NONCE_OFFSET + 16]
                 .try_into()
                 .map_err(|_| ErrorCode::FlushFailed)?;
+            let mut move_cts = [[0u8; 32]; 4];
+            for i in 0..4 {
+                let start = MOVE_CT_OFFSET as usize + i * 32;
+                move_cts[i].copy_from_slice(&acc_data[start..start + 32]);
+            }
             drop(acc_data);
             builder = builder
                 .plaintext_u128(u128::from_le_bytes(nonce_bytes))
-                .account(
-                    ctx.remaining_accounts[0].key(),
-                    MOVE_CT_OFFSET,
-                    MOVE_CT_SIZE,
-                );
+                .encrypted_u32(move_cts[0])   // ships_arriving
+                .encrypted_u32(move_cts[1])   // metal_arriving
+                .encrypted_u32(move_cts[2])   // attacking_planet_id
+                .encrypted_u32(move_cts[3]);  // attacking_player_id
         }
 
         // FlushTimingInput (4 fields: current_slot, game_speed, last_updated_slot, flush_count)
+        // planet_input.owner re-encrypts output (no separate planet_key needed)
         builder = builder
             .x25519_pubkey(flush_pubkey)
             .plaintext_u128(flush_nonce)
-            .encrypted_u64(extract_ct(&flush_cts, 0))  // current_slot
-            .encrypted_u64(extract_ct(&flush_cts, 1))  // game_speed
-            .encrypted_u64(extract_ct(&flush_cts, 2))  // last_updated_slot
-            .encrypted_u64(extract_ct(&flush_cts, 3));  // flush_count
+            .encrypted_u32(extract_ct(&flush_cts, 0))  // current_slot
+            .encrypted_u32(extract_ct(&flush_cts, 1))  // game_speed
+            .encrypted_u32(extract_ct(&flush_cts, 2))  // last_updated_slot
+            .encrypted_u32(extract_ct(&flush_cts, 3));  // flush_count
 
         let args = builder.build();
 
@@ -877,16 +801,16 @@ pub mod encrypted_forest {
             }
         };
 
-        // Output: Enc<Shared, PlanetDynamic> (single value, not tuple)
-        let enc_dynamic = &o.field_0;
+        // Output: Enc<Shared, PlanetState> (single value, not tuple)
+        let enc_state = &o.field_0;
 
-        // Update planet — ONLY dynamic section
+        // Update planet
         let planet = &mut ctx.accounts.celestial_body;
-        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
-        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
+        planet.state_enc_pubkey = enc_state.encryption_key;
+        planet.state_enc_nonce = enc_state.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_DYNAMIC_FIELDS {
-            planet.dynamic_enc_ciphertexts[i] = enc_dynamic.ciphertexts[i];
+        while i < PLANET_STATE_FIELDS {
+            planet.state_enc_ciphertexts[i] = enc_state.ciphertexts[i];
             i += 1;
         }
         let slot = Clock::get()?.slot;
@@ -910,9 +834,9 @@ pub mod encrypted_forest {
 
     // -----------------------------------------------------------------------
     // Queue upgrade_planet
-    // Planet state (static + dynamic) read via .account() from celestial_body.
+    // Planet state + upgrade input passed inline as ciphertexts.
     // upgrade_cts = 6 * 32.
-    // Output: (PlanetStatic, PlanetDynamic, UpgradeRevealed)
+    // Output: (PlanetState, UpgradeRevealed)
     // -----------------------------------------------------------------------
 
     pub fn queue_upgrade_planet(
@@ -931,27 +855,26 @@ pub mod encrypted_forest {
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // Enc<Shared, PlanetStatic> — pubkey + nonce passed individually, ciphertexts via .account()
-        // Enc<Shared, PlanetDynamic> — same pattern
+        // Enc<Shared, PlanetState> — all inline
         let body = &ctx.accounts.celestial_body;
         let mut builder = ArgBuilder::new()
-            .x25519_pubkey(body.static_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(body.static_enc_nonce))
-            .account(body.key(), STATIC_CT_OFFSET, STATIC_CT_SIZE)
-            .x25519_pubkey(body.dynamic_enc_pubkey)
-            .plaintext_u128(u128::from_le_bytes(body.dynamic_enc_nonce))
-            .account(body.key(), DYNAMIC_CT_OFFSET, DYNAMIC_CT_SIZE);
+            .x25519_pubkey(body.state_enc_pubkey)
+            .plaintext_u128(u128::from_le_bytes(body.state_enc_nonce))
+            .encrypted_u32(body.state_enc_ciphertexts[0])  // Pack FE 0
+            .encrypted_u32(body.state_enc_ciphertexts[1])  // Pack FE 1
+            .encrypted_u32(body.state_enc_ciphertexts[2]); // Pack FE 2
 
         // UpgradePlanetInput: 6 fields (player_id, focus, current_slot, game_speed, last_updated_slot, metal_upgrade_cost)
         builder = builder
             .x25519_pubkey(upgrade_pubkey)
             .plaintext_u128(upgrade_nonce)
-            .encrypted_u64(extract_ct(&upgrade_cts, 0))  // player_id
-            .encrypted_u64(extract_ct(&upgrade_cts, 1))  // focus
-            .encrypted_u64(extract_ct(&upgrade_cts, 2))  // current_slot
-            .encrypted_u64(extract_ct(&upgrade_cts, 3))  // game_speed
-            .encrypted_u64(extract_ct(&upgrade_cts, 4))  // last_updated_slot
-            .encrypted_u64(extract_ct(&upgrade_cts, 5)); // metal_upgrade_cost
+            .encrypted_u32(extract_ct(&upgrade_cts, 0))  // player_id
+            .encrypted_u32(extract_ct(&upgrade_cts, 1))  // focus
+            .encrypted_u32(extract_ct(&upgrade_cts, 2))  // current_slot
+            .encrypted_u32(extract_ct(&upgrade_cts, 3))  // game_speed
+            .encrypted_u32(extract_ct(&upgrade_cts, 4))  // last_updated_slot
+            .encrypted_u32(extract_ct(&upgrade_cts, 5)); // metal_upgrade_cost
+        // planet_input.owner re-encrypts output (no separate planet_key needed)
 
         let args = builder.build();
 
@@ -992,29 +915,19 @@ pub mod encrypted_forest {
             }
         };
 
-        // Output tuple: (Enc<Shared, PlanetStatic>, Enc<Shared, PlanetDynamic>, Enc<Shared, UpgradeRevealed>)
-        let enc_static = &o.field_0.field_0;
-        let enc_dynamic = &o.field_0.field_1;
-        let revealed = &o.field_0.field_2;
+        // Output tuple: (Enc<Shared, PlanetState>, Enc<Shared, UpgradeRevealed>)
+        let enc_state = &o.field_0.field_0;
+        let revealed = &o.field_0.field_1;
 
         let planet = &mut ctx.accounts.celestial_body;
 
-        // Write static section
-        planet.static_enc_pubkey = enc_static.encryption_key;
-        planet.static_enc_nonce = enc_static.nonce.to_le_bytes();
+        // Write state section
+        planet.state_enc_pubkey = enc_state.encryption_key;
+        planet.state_enc_nonce = enc_state.nonce.to_le_bytes();
         let mut i = 0;
-        while i < PLANET_STATIC_FIELDS {
-            planet.static_enc_ciphertexts[i] = enc_static.ciphertexts[i];
+        while i < PLANET_STATE_FIELDS {
+            planet.state_enc_ciphertexts[i] = enc_state.ciphertexts[i];
             i += 1;
-        }
-
-        // Write dynamic section
-        planet.dynamic_enc_pubkey = enc_dynamic.encryption_key;
-        planet.dynamic_enc_nonce = enc_dynamic.nonce.to_le_bytes();
-        let mut j = 0;
-        while j < PLANET_DYNAMIC_FIELDS {
-            planet.dynamic_enc_ciphertexts[j] = enc_dynamic.ciphertexts[j];
-            j += 1;
         }
 
         planet.last_updated_slot = Clock::get()?.slot;
@@ -1121,14 +1034,10 @@ pub struct EncryptedCelestialBody {
     pub planet_hash: [u8; 32],
     pub last_updated_slot: u64,
     pub last_flushed_slot: u64,
-    // Static section (176 bytes) -- Pack<[u64;11]> = 4 FEs
-    pub static_enc_pubkey: [u8; 32],
-    pub static_enc_nonce: [u8; 16],
-    pub static_enc_ciphertexts: [[u8; 32]; 4],
-    // Dynamic section (112 bytes) -- Pack<[u64;4]> = 2 FEs
-    pub dynamic_enc_pubkey: [u8; 32],
-    pub dynamic_enc_nonce: [u8; 16],
-    pub dynamic_enc_ciphertexts: [[u8; 32]; 2],
+    // State section (144 bytes) -- Pack<[u32;15]> = 3 FEs
+    pub state_enc_pubkey: [u8; 32],
+    pub state_enc_nonce: [u8; 16],
+    pub state_enc_ciphertexts: [[u8; 32]; PLANET_STATE_FIELDS],
 }
 
 impl EncryptedCelestialBody {
@@ -1136,14 +1045,10 @@ impl EncryptedCelestialBody {
         + 32   // planet_hash
         + 8    // last_updated_slot
         + 8    // last_flushed_slot
-        // Static section
-        + 32   // static_enc_pubkey
-        + 16   // static_enc_nonce
-        + (4 * 32) // static_enc_ciphertexts (4 packed FEs)
-        // Dynamic section
-        + 32   // dynamic_enc_pubkey
-        + 16   // dynamic_enc_nonce
-        + (2 * 32); // dynamic_enc_ciphertexts (2 packed FEs)
+        // State section
+        + 32   // state_enc_pubkey
+        + 16   // state_enc_nonce
+        + (PLANET_STATE_FIELDS * 32); // state_enc_ciphertexts (3 packed FEs)
 }
 
 /// Dynamic-size account tracking pending moves for a planet.
@@ -1182,6 +1087,9 @@ pub struct PendingMoveAccount {
     pub move_id: u64,
     pub landing_slot: u64,
     pub payer: Pubkey,
+    /// Set to true by the MPC callback once encrypted data is written.
+    /// Flush skips moves where populated == false (MPC not yet complete).
+    pub populated: bool,
     pub enc_nonce: u128,
     pub enc_ciphertexts: [[u8; 32]; 4],  // ships, metal, attacking_planet_id, attacking_player_id
 }
@@ -1193,6 +1101,7 @@ impl PendingMoveAccount {
         + 8    // move_id
         + 8    // landing_slot
         + 32   // payer
+        + 1    // populated
         + 16   // enc_nonce
         + (4 * 32); // enc_ciphertexts
 }
@@ -1262,15 +1171,6 @@ pub struct InitSpawnPlanetEvent {
     pub encrypted_planet_hash: [u8; 32],
     pub encrypted_valid: [u8; 32],
     pub encrypted_spawn_valid: [u8; 32],
-    pub encryption_key: [u8; 32],
-    pub nonce: [u8; 16],
-}
-
-#[event]
-pub struct ProcessMoveEvent {
-    pub encrypted_landing_slot: [u8; 32],
-    pub encrypted_surviving_ships: [u8; 32],
-    pub encrypted_valid: [u8; 32],
     pub encryption_key: [u8; 32],
     pub nonce: [u8; 16],
 }
@@ -1757,8 +1657,6 @@ pub struct ProcessMoveCallback<'info> {
     pub instructions_sysvar: AccountInfo<'info>,
     #[account(mut)]
     pub source_body: Box<Account<'info, EncryptedCelestialBody>>,
-    #[account(mut)]
-    pub target_pending: Box<Account<'info, PendingMovesMetadata>>,
     #[account(mut)]
     pub move_account: Box<Account<'info, PendingMoveAccount>>,
 }
