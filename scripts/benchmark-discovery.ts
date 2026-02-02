@@ -2,18 +2,17 @@
  * Benchmark: Planet Discovery Hash Performance
  *
  * Measures how long it takes to scan coordinates and discover planets
- * using the same BLAKE3 hashing algorithm as the on-chain program.
+ * using SHA3-256 for property determination (matching MPC circuit).
  *
  * Supports variable difficulty via iterated hashing rounds:
- *   hash_0 = blake3(x || y || game_id)
- *   hash_n = blake3(hash_{n-1})
- *   planet_hash = hash_rounds
+ *   hash_0 = sha3_256(x || y || game_id || padding)
+ *   hash_n = sha3_256(hash_{n-1})
+ *   property_hash = hash_rounds
  *
  * On-chain verification cost estimate:
- *   - BLAKE3 on Solana BPF ≈ 1,500–3,000 CU per hash (24–32 byte input)
- *   - Max compute budget per tx: 1,400,000 CU
- *   - Practical max rounds ≈ 400–800 (leaving room for account reads + logic)
- *   - Conservative safe max: ~300 rounds
+ *   - SHA3-256 in Arcis MPC has fixed cost per round
+ *   - Max rounds in MPC circuit: 200 (MAX_HASH_ROUNDS)
+ *   - Start with 1 round and measure circuit weight before increasing
  *
  * Map coordinates are i64 in Rust, so max radius is 9,223,372,036,854,775,807
  * (2^63 - 1). Even a radius of 10 billion only scratches the surface — the
@@ -26,7 +25,7 @@
  *   bun run scripts/benchmark-discovery.ts [--size N] [--rounds N] [--cores N]
  */
 
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha3_256 } from "@noble/hashes/sha3.js";
 import type { WorkerResult, WorkerTask } from "./benchmark-worker.js";
 import { availableParallelism } from "node:os";
 
@@ -49,7 +48,7 @@ interface BenchConfig {
 
 const defaults: BenchConfig = {
   mapRadius: 50,
-  rounds: 100, // matches DEFAULT_HASH_ROUNDS in game config
+  rounds: 1, // matches DEFAULT_HASH_ROUNDS in game config
   gameId: 1n,
   deadSpaceThreshold: 204, // ~80% dead space (204/256)
   cores: null,
@@ -62,21 +61,22 @@ const WORKER_URL = new URL("./benchmark-worker.ts", import.meta.url);
 // Single-threaded hash (used for sweep mode + single-core benchmark)
 // ---------------------------------------------------------------------------
 
-function computePlanetHashWithDifficulty(
+function computePropertyHashBench(
   x: bigint,
   y: bigint,
   gameId: bigint,
   rounds: number
 ): Uint8Array {
-  const buf = new ArrayBuffer(24);
+  const buf = new ArrayBuffer(32);
   const view = new DataView(buf);
   view.setBigInt64(0, x, true);
   view.setBigInt64(8, y, true);
   view.setBigUint64(16, gameId, true);
+  // bytes 24..31 are zero (padding)
 
-  let hash = blake3(new Uint8Array(buf));
+  let hash = sha3_256(new Uint8Array(buf));
   for (let r = 1; r < rounds; r++) {
-    hash = blake3(hash);
+    hash = sha3_256(hash);
   }
   return hash;
 }
@@ -166,10 +166,11 @@ function runSingleThreaded(
   let planetsFound = 0;
   let coordsProcessed = 0;
 
-  const buf = new ArrayBuffer(24);
+  const buf = new ArrayBuffer(32);
   const view = new DataView(buf);
   const input = new Uint8Array(buf);
   view.setBigUint64(16, gameId, true);
+  // bytes 24..31 are zero (padding)
 
   const startTime = performance.now();
 
@@ -178,9 +179,9 @@ function runSingleThreaded(
     for (let xi = -mapRadius; xi <= mapRadius; xi++) {
       view.setBigInt64(0, BigInt(xi), true);
 
-      let hash = blake3(input);
+      let hash = sha3_256(input);
       for (let r = 1; r < rounds; r++) {
-        hash = blake3(hash);
+        hash = sha3_256(hash);
       }
 
       coordsProcessed++;
@@ -246,22 +247,11 @@ function printHeader(config: BenchConfig) {
   const availableCU = maxCU - accountOverhead;
   const fitsInTx = cuPerVerification <= availableCU;
 
-  console.log(`--- On-chain verification estimate ---`);
-  console.log(`CU per hash:         ~${cuPerHash}`);
-  console.log(
-    `CU for ${rounds} round(s):   ~${cuPerVerification.toLocaleString()}`
-  );
-  console.log(
-    `Max CU per tx:       ${maxCU.toLocaleString()} (${accountOverhead.toLocaleString()} overhead)`
-  );
-  console.log(
-    `Fits in single tx:   ${fitsInTx ? "YES" : "NO"} (${((cuPerVerification / availableCU) * 100).toFixed(1)}% of budget)`
-  );
-  if (!fitsInTx) {
-    console.log(
-      `  WARNING: Reduce rounds to <=${Math.floor(availableCU / cuPerHash)} to fit in a single transaction`
-    );
-  }
+  console.log(`--- MPC circuit estimate ---`);
+  console.log(`Max hash rounds in MPC: 200 (MAX_HASH_ROUNDS)`);
+  console.log(`Configured rounds:      ${rounds}`);
+  console.log(`Note: MPC always evaluates MAX_HASH_ROUNDS iterations;`);
+  console.log(`      hash_rounds controls which result is used.`);
   console.log();
 }
 
@@ -280,8 +270,8 @@ function printResults(
   const elapsedSec = elapsedMs / 1000;
   const coordsPerSec = coordsProcessed / elapsedSec;
   const msPerCoord = elapsedMs / coordsProcessed;
-  const blake3Calls = coordsProcessed * rounds;
-  const blake3PerSec = blake3Calls / elapsedSec;
+  const sha3Calls = coordsProcessed * rounds;
+  const sha3PerSec = sha3Calls / elapsedSec;
   const speedup = baselineMs ? baselineMs / elapsedMs : undefined;
 
   console.log(`--- ${label} ---`);
@@ -292,7 +282,7 @@ function printResults(
   console.log(`Coords/sec:          ${fmtNum(coordsPerSec)}`);
   console.log(`ms/coord:            ${msPerCoord.toFixed(6)}`);
   console.log(
-    `BLAKE3 calls/sec:    ${fmtNum(blake3PerSec)} (${blake3Calls.toLocaleString()} total)`
+    `SHA3 calls/sec:    ${fmtNum(sha3PerSec)} (${sha3Calls.toLocaleString()} total)`
   );
   if (speedup !== undefined) {
     console.log(`Speedup vs 1 core:   ${speedup.toFixed(2)}x`);
@@ -413,7 +403,7 @@ function runDifficultySweep(config: BenchConfig) {
   );
   console.log(`Game ID: ${gameId}\n`);
   console.log(
-    `${"Rounds".padStart(8)} | ${"Time (ms)".padStart(10)} | ${"ms/coord".padStart(10)} | ${"BLAKE3/s".padStart(12)} | ${"Est CU".padStart(10)} | Fits TX?`
+    `${"Rounds".padStart(8)} | ${"Time (ms)".padStart(10)} | ${"ms/coord".padStart(10)} | ${"SHA3/s".padStart(12)} | ${"Est CU".padStart(10)} | Fits TX?`
   );
   console.log("-".repeat(78));
 
@@ -423,7 +413,7 @@ function runDifficultySweep(config: BenchConfig) {
   for (const rounds of roundsList) {
     const start = performance.now();
     for (let i = 0; i < sampleSize; i++) {
-      computePlanetHashWithDifficulty(
+      computePropertyHashBench(
         BigInt(i),
         BigInt(i >> 8),
         gameId,
@@ -432,12 +422,12 @@ function runDifficultySweep(config: BenchConfig) {
     }
     const elapsed = performance.now() - start;
     const msPerCoord = elapsed / sampleSize;
-    const blake3PerSec = (sampleSize * rounds) / (elapsed / 1000);
+    const sha3PerSec = (sampleSize * rounds) / (elapsed / 1000);
     const estCU = cuPerHash * rounds;
     const fits = estCU <= maxAvailable;
 
     console.log(
-      `${String(rounds).padStart(8)} | ${elapsed.toFixed(2).padStart(10)} | ${msPerCoord.toFixed(6).padStart(10)} | ${fmtNum(blake3PerSec).padStart(12)} | ${estCU.toLocaleString().padStart(10)} | ${fits ? "YES" : "NO "} (${((estCU / maxAvailable) * 100).toFixed(0)}%)`
+      `${String(rounds).padStart(8)} | ${elapsed.toFixed(2).padStart(10)} | ${msPerCoord.toFixed(6).padStart(10)} | ${fmtNum(sha3PerSec).padStart(12)} | ${estCU.toLocaleString().padStart(10)} | ${fits ? "YES" : "NO "} (${((estCU / maxAvailable) * 100).toFixed(0)}%)`
     );
   }
 

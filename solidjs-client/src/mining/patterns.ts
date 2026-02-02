@@ -3,7 +3,7 @@
  * Each pattern is an iterator yielding [x, y] pairs from a center point.
  */
 
-export type ScanPattern = "spiral" | "checkerboard" | "ring" | "quadrant" | "random";
+export type ScanPattern = "spiral" | "checkerboard" | "ring" | "quadrant";
 
 /**
  * Generate coordinates in an expanding spiral from center.
@@ -114,29 +114,6 @@ export function* quadrantPattern(
   }
 }
 
-/**
- * Random pattern — random coordinates within the radius.
- * Good for quick probabilistic discovery.
- */
-export function* randomPattern(
-  centerX: number,
-  centerY: number,
-  maxRadius: number
-): Generator<[number, number]> {
-  const visited = new Set<string>();
-  const maxCells = (2 * maxRadius + 1) ** 2;
-
-  while (visited.size < maxCells) {
-    const dx = Math.floor(Math.random() * (2 * maxRadius + 1)) - maxRadius;
-    const dy = Math.floor(Math.random() * (2 * maxRadius + 1)) - maxRadius;
-    const key = `${centerX + dx},${centerY + dy}`;
-    if (!visited.has(key)) {
-      visited.add(key);
-      yield [centerX + dx, centerY + dy];
-    }
-  }
-}
-
 /** Get a pattern generator by name */
 export function getPatternGenerator(
   pattern: ScanPattern,
@@ -149,7 +126,6 @@ export function getPatternGenerator(
     case "checkerboard": return checkerboardPattern(centerX, centerY, maxRadius);
     case "ring": return ringPattern(centerX, centerY, maxRadius);
     case "quadrant": return quadrantPattern(centerX, centerY, maxRadius);
-    case "random": return randomPattern(centerX, centerY, maxRadius);
   }
 }
 
@@ -158,5 +134,4 @@ export const PATTERN_DESCRIPTIONS: Record<ScanPattern, string> = {
   checkerboard: "Every other cell — faster coverage with gaps to fill later",
   ring: "Concentric circles — good for radial exploration",
   quadrant: "One quadrant at a time (NE, SE, SW, NW) — methodical coverage",
-  random: "Random coordinates — quick probabilistic discovery",
 };

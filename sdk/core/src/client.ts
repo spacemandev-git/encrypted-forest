@@ -246,9 +246,10 @@ export class EncryptedForestClient {
    */
   decryptPlanetState(
     planetHash: Uint8Array,
+    mxePublicKey: Uint8Array,
     encAccount: EncryptedCelestialBodyAccount
   ): PlanetState {
-    return decryptPlanetState(planetHash, encAccount);
+    return decryptPlanetState(planetHash, mxePublicKey, encAccount);
   }
 
   /**
@@ -256,11 +257,12 @@ export class EncryptedForestClient {
    */
   decryptPlanetStatic(
     planetHash: Uint8Array,
+    mxePublicKey: Uint8Array,
     encAccount: EncryptedCelestialBodyAccount
   ): PlanetStaticState {
     return decryptPlanetStatic(
       planetHash,
-      encAccount.stateEncPubkey,
+      mxePublicKey,
       encAccount.stateEncNonce,
       encAccount.stateEncCiphertexts
     );
@@ -271,11 +273,12 @@ export class EncryptedForestClient {
    */
   decryptPlanetDynamic(
     planetHash: Uint8Array,
+    mxePublicKey: Uint8Array,
     encAccount: EncryptedCelestialBodyAccount
   ): PlanetDynamicState {
     return decryptPlanetDynamic(
       planetHash,
-      encAccount.stateEncPubkey,
+      mxePublicKey,
       encAccount.stateEncNonce,
       encAccount.stateEncCiphertexts
     );

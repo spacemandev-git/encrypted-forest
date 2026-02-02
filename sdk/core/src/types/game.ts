@@ -77,4 +77,4 @@ export const DEFAULT_THRESHOLDS: NoiseThresholds = {
   sizeThreshold5: 250,
 };
 
-export const DEFAULT_HASH_ROUNDS = 100;
+export const DEFAULT_HASH_ROUNDS = 1;

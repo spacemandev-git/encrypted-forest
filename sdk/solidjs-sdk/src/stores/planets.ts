@@ -130,7 +130,7 @@ export function createPlanetsStore(
 
       let decrypted: PlanetState | null = null;
       try {
-        decrypted = decryptPlanetState(entry.discovery.hash, encAccount);
+        decrypted = decryptPlanetState(entry.discovery.hash, mxePublicKey, encAccount);
       } catch {
         // Decryption may fail if key material is wrong or data is corrupted
       }
@@ -210,7 +210,7 @@ export function createPlanetsStore(
             stateEncCiphertexts: deserializeCiphertexts(p.stateEncCiphertexts, 32),
           };
           entry.encrypted = cachedEncrypted;
-          entry.decrypted = decryptPlanetState(entry.discovery.hash, cachedEncrypted);
+          entry.decrypted = decryptPlanetState(entry.discovery.hash, mxePublicKey, cachedEncrypted);
         } catch {
           // Cached encrypted data may be stale
         }

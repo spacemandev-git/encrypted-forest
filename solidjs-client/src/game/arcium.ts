@@ -203,7 +203,7 @@ export function encryptAndPack(
   cipher: RescueCipher,
   values: bigint[],
   nonce: Uint8Array
-): { packed: Uint8Array; ciphertexts: Uint8Array[] } {
+): { packed: Uint8Array; ciphertexts: number[][] } {
   const ciphertexts = cipher.encrypt(values, nonce);
   const packed = new Uint8Array(ciphertexts.length * 32);
   for (let i = 0; i < ciphertexts.length; i++) {
@@ -227,6 +227,28 @@ export function buildInitSpawnPlanetValues(
     BigInt.asUintN(64, y),
     BigInt.asUintN(32, playerId),
     BigInt.asUintN(32, sourcePlanetId),
+  ];
+}
+
+export function buildProcessMoveValues(
+  playerId: bigint,
+  sourcePlanetId: bigint,
+  shipsToSend: bigint,
+  metalToSend: bigint,
+  sourceX: bigint,
+  sourceY: bigint,
+  targetX: bigint,
+  targetY: bigint
+): bigint[] {
+  return [
+    BigInt.asUintN(32, playerId),
+    BigInt.asUintN(32, sourcePlanetId),
+    BigInt.asUintN(32, shipsToSend),
+    BigInt.asUintN(32, metalToSend),
+    BigInt.asUintN(64, sourceX),
+    BigInt.asUintN(64, sourceY),
+    BigInt.asUintN(64, targetX),
+    BigInt.asUintN(64, targetY),
   ];
 }
 

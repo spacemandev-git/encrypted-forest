@@ -8,7 +8,7 @@ import { PATTERN_DESCRIPTIONS, type ScanPattern } from "../mining/patterns.js";
 import DraggablePanel from "./DraggablePanel.js";
 import tui from "../styles/tui.module.css";
 
-const PATTERNS: ScanPattern[] = ["spiral", "checkerboard", "ring", "quadrant", "random"];
+const PATTERNS: ScanPattern[] = ["spiral", "checkerboard", "ring", "quadrant"];
 const BODY_TYPE_NAMES = ["Planet", "Quasar", "Rift", "Asteroid"];
 const SIZE_NAMES = ["", "Miniscule", "Tiny", "Small", "Medium", "Large", "Gargantuan"];
 

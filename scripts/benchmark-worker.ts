@@ -3,7 +3,7 @@
  * Receives a chunk of the coordinate space and hashes it.
  */
 
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha3_256 } from "@noble/hashes/sha3.js";
 
 export interface WorkerTask {
   /** Rows this worker should process (inclusive y range) */
@@ -32,20 +32,21 @@ self.onmessage = (event: MessageEvent<WorkerTask>) => {
   let planetsFound = 0;
   let coordsProcessed = 0;
 
-  // Pre-allocate the input buffer once
-  const buf = new ArrayBuffer(24);
+  // Pre-allocate the input buffer once (32 bytes: x || y || gameId || padding)
+  const buf = new ArrayBuffer(32);
   const view = new DataView(buf);
   const input = new Uint8Array(buf);
   view.setBigUint64(16, gid, true); // game_id doesn't change
+  // bytes 24..31 are zero (padding)
 
   for (let yi = yStart; yi <= yEnd; yi++) {
     view.setBigInt64(8, BigInt(yi), true); // y changes per row
     for (let xi = xStart; xi <= xEnd; xi++) {
       view.setBigInt64(0, BigInt(xi), true);
 
-      let hash = blake3(input);
+      let hash = sha3_256(input);
       for (let r = 1; r < rounds; r++) {
-        hash = blake3(hash);
+        hash = sha3_256(hash);
       }
 
       coordsProcessed++;

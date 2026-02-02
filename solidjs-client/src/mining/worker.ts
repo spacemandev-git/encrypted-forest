@@ -9,6 +9,7 @@
  */
 
 import { blake3 } from "@noble/hashes/blake3.js";
+import { sha3_256 } from "@noble/hashes/sha3.js";
 
 // ---------------------------------------------------------------------------
 // Inline hashing logic (must match core SDK)
@@ -23,6 +24,25 @@ function computePlanetHash(x: bigint, y: bigint, gameId: bigint, rounds: number 
   let hash = blake3(new Uint8Array(buf));
   for (let r = 1; r < rounds; r++) {
     hash = blake3(hash);
+  }
+  return hash;
+}
+
+/**
+ * MPC-compatible SHA3-256 hash for property determination.
+ * Must match encrypted-ixs/src/lib.rs compute_property_hash.
+ * Input: 32 bytes (x LE i64 || y LE i64 || gameId LE u64 || 8 zero-padding bytes).
+ */
+function computePropertyHash(x: bigint, y: bigint, gameId: bigint, rounds: number = 1): Uint8Array {
+  const buf = new ArrayBuffer(32);
+  const view = new DataView(buf);
+  view.setBigInt64(0, x, true);
+  view.setBigInt64(8, y, true);
+  view.setBigUint64(16, gameId, true);
+  // bytes 24..31 are zero (padding)
+  let hash = sha3_256(new Uint8Array(buf));
+  for (let r = 1; r < rounds; r++) {
+    hash = sha3_256(hash);
   }
   return hash;
 }
@@ -147,9 +167,12 @@ self.onmessage = (e: MessageEvent<MineRequest>) => {
   for (const [x, y] of coords) {
     const bx = BigInt(x);
     const by = BigInt(y);
-    const hash = computePlanetHash(bx, by, gid, hashRounds);
-    const props = determineCelestialBody(hash, thresholds);
+    // Use MPC-compatible SHA3-256 for property determination
+    const propHash = computePropertyHash(bx, by, gid, hashRounds);
+    const props = determineCelestialBody(propHash, thresholds);
     if (props) {
+      // blake3 hash for PDA seed / decryption key
+      const hash = computePlanetHash(bx, by, gid, hashRounds);
       discovered.push({
         x: x.toString(),
         y: y.toString(),

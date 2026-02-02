@@ -16,6 +16,12 @@ import {
   type InputState,
 } from "./input.js";
 
+export interface TargetingInfo {
+  gridX: number;
+  gridY: number;
+  maxDistance: number;
+}
+
 export interface TuiCanvasOptions {
   canvas: HTMLCanvasElement;
   getPlanets: () => ReadonlyMap<string, PlanetEntry>;
@@ -23,6 +29,7 @@ export interface TuiCanvasOptions {
   getMapDiameter: () => number;
   getPlayerId: () => bigint | null;
   getSelectedHash: () => string | null;
+  getTargetingInfo?: () => TargetingInfo | null;
   onCellClick?: (gridX: number, gridY: number) => void;
 }
 
@@ -142,10 +149,42 @@ export class TuiCanvas {
     );
     renderFog(this.ctx, this.camera, w, h, exploredCoords, mapDiameter);
 
+    // Range circle for targeting mode
+    if (this.opts.getTargetingInfo) {
+      const targeting = this.opts.getTargetingInfo();
+      if (targeting) {
+        this.renderRangeCircle(w, h, targeting, time);
+      }
+    }
+
     // Selection highlight on hovered cell
     if (this.input.hoveredCell) {
       this.renderHoverCell(w, h);
     }
+  }
+
+  private renderRangeCircle(w: number, h: number, targeting: TargetingInfo, time: number): void {
+    const [sx, sy] = worldToScreen(
+      this.camera,
+      targeting.gridX * CELL_WIDTH,
+      targeting.gridY * CELL_HEIGHT,
+      w, h
+    );
+    // Use average of cell dimensions as conversion factor
+    const avgCellPx = (CELL_WIDTH + CELL_HEIGHT) / 2;
+    const radiusPx = targeting.maxDistance * avgCellPx * this.camera.zoom;
+
+    // Pulsing opacity
+    const pulse = 0.45 + 0.15 * Math.sin(time * 3);
+
+    this.ctx.save();
+    this.ctx.strokeStyle = `rgba(255, 50, 50, ${pulse})`;
+    this.ctx.lineWidth = 1.5;
+    this.ctx.setLineDash([6, 4]);
+    this.ctx.beginPath();
+    this.ctx.arc(sx, sy, radiusPx, 0, Math.PI * 2);
+    this.ctx.stroke();
+    this.ctx.restore();
   }
 
   private renderHoverCell(w: number, h: number): void {

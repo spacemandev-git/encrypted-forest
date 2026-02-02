@@ -111,32 +111,45 @@ mod circuits {
     // NO return statements allowed in Arcis.
     // =========================================================================
 
-    /// Deterministic hash mixing using only add/mul.
-    /// Returns (h0, h1, h2, h3) as four u64 values.
-    fn mix_hash(x: u64, y: u64, game_id: u64) -> (u64, u64, u64, u64) {
-        let a = x * 31 + y * 37 + game_id * 41 + 7;
-        let b = y * 43 + game_id * 47 + x * 53 + 13;
-        let c = game_id * 59 + x * 61 + y * 67 + 17;
-        let d = a * 3 + b * 5 + c * 7 + 19;
-        (a, b, c, d)
+    fn u64_to_le_bytes(val: u64) -> [u8; 8] {
+        let b0 = (val % 256) as u8;
+        let b1 = ((val / 256) % 256) as u8;
+        let b2 = ((val / 65536) % 256) as u8;
+        let b3 = ((val / 16777216) % 256) as u8;
+        let b4 = ((val / 4294967296) % 256) as u8;
+        let b5 = ((val / 1099511627776) % 256) as u8;
+        let b6 = ((val / 281474976710656) % 256) as u8;
+        let b7 = ((val / 72057594037927936) % 256) as u8;
+        [b0, b1, b2, b3, b4, b5, b6, b7]
     }
 
-    /// Extract byte from u64: byte_index 0 = lowest byte
-    fn extract_byte(h: u64, index: u64) -> u64 {
-        let divisor: u64 = if index == 0 {
-            1
-        } else if index == 1 {
-            256
-        } else if index == 2 {
-            65536
-        } else if index == 3 {
-            16777216
-        } else if index == 4 {
-            4294967296
-        } else {
-            1099511627776
-        };
-        (h / divisor) % 256
+    const MAX_HASH_ROUNDS: usize = 200;
+
+    /// Compute SHA3-256 hash of (x || y || game_id) with iterated rounds.
+    /// Input: 32 bytes (24 bytes of data + 8 zero padding bytes).
+    /// Must match client-side sha3PropertyHash in sdk/core.
+    fn compute_property_hash(x: u64, y: u64, game_id: u64, hash_rounds: u64) -> [u8; 32] {
+        let xb = u64_to_le_bytes(x);
+        let yb = u64_to_le_bytes(y);
+        let gb = u64_to_le_bytes(game_id);
+
+        let input: [u8; 32] = [
+            xb[0], xb[1], xb[2], xb[3], xb[4], xb[5], xb[6], xb[7],
+            yb[0], yb[1], yb[2], yb[3], yb[4], yb[5], yb[6], yb[7],
+            gb[0], gb[1], gb[2], gb[3], gb[4], gb[5], gb[6], gb[7],
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let hasher = SHA3_256::new();
+        let mut hash: [u8; 32] = hasher.digest(&input);
+
+        for r in 1..MAX_HASH_ROUNDS {
+            let hasher2 = SHA3_256::new();
+            let new_hash = hasher2.digest(&hash);
+            hash = if (r as u64) < hash_rounds { new_hash } else { hash };
+        }
+
+        hash
     }
 
     /// Determine body type from hash byte.
@@ -480,20 +493,21 @@ mod circuits {
         size_threshold_3: u64,
         size_threshold_4: u64,
         size_threshold_5: u64,
+        hash_rounds: u64,
         planet_key: Shared,
         observer: Shared,
     ) -> (Enc<Shared, PlanetState>, Enc<Shared, InitPlanetRevealed>) {
         let inp = input.to_arcis();
 
-        let (h0, h1, h2, h3) = mix_hash(inp.x, inp.y, game_id);
-        let planet_hash = h0 + h1 * 3 + h2 * 7 + h3 * 11;
+        let hash = compute_property_hash(inp.x, inp.y, game_id, hash_rounds);
+        let planet_hash_val = (hash[0] as u64) + (hash[1] as u64) * 3 + (hash[2] as u64) * 7 + (hash[3] as u64) * 11;
 
-        let byte0 = extract_byte(h0, 0);
-        let byte1 = extract_byte(h0, 1);
-        let byte2 = extract_byte(h0, 2);
-        let byte3 = extract_byte(h0, 3);
-        let byte4 = extract_byte(h0, 4);
-        let byte5 = extract_byte(h0, 5);
+        let byte0 = hash[0] as u64;
+        let byte1 = hash[1] as u64;
+        let byte2 = hash[2] as u64;
+        let byte3 = hash[3] as u64;
+        let byte4 = hash[4] as u64;
+        let byte5 = hash[5] as u64;
 
         let is_body: u32 = if byte0 >= dead_space_threshold { 1 } else { 0 };
 
@@ -518,7 +532,7 @@ mod circuits {
         );
 
         let revealed = InitPlanetRevealed {
-            planet_hash,
+            planet_hash: planet_hash_val,
             valid: is_body,
         };
 
@@ -543,20 +557,21 @@ mod circuits {
         size_threshold_3: u64,
         size_threshold_4: u64,
         size_threshold_5: u64,
+        hash_rounds: u64,
         planet_key: Shared,
         observer: Shared,
     ) -> (Enc<Shared, PlanetState>, Enc<Shared, SpawnPlanetRevealed>) {
         let inp = input.to_arcis();
 
-        let (h0, h1, h2, h3) = mix_hash(inp.x, inp.y, game_id);
-        let planet_hash = h0 + h1 * 3 + h2 * 7 + h3 * 11;
+        let hash = compute_property_hash(inp.x, inp.y, game_id, hash_rounds);
+        let planet_hash_val = (hash[0] as u64) + (hash[1] as u64) * 3 + (hash[2] as u64) * 7 + (hash[3] as u64) * 11;
 
-        let byte0 = extract_byte(h0, 0);
-        let byte1 = extract_byte(h0, 1);
-        let byte2 = extract_byte(h0, 2);
-        let byte3 = extract_byte(h0, 3);
-        let byte4 = extract_byte(h0, 4);
-        let byte5 = extract_byte(h0, 5);
+        let byte0 = hash[0] as u64;
+        let byte1 = hash[1] as u64;
+        let byte2 = hash[2] as u64;
+        let byte3 = hash[3] as u64;
+        let byte4 = hash[4] as u64;
+        let byte5 = hash[5] as u64;
 
         let is_body: u32 = if byte0 >= dead_space_threshold { 1 } else { 0 };
 
@@ -588,7 +603,7 @@ mod circuits {
         );
 
         let revealed = SpawnPlanetRevealed {
-            planet_hash,
+            planet_hash: planet_hash_val,
             valid: is_body,
             is_spawn_valid,
         };

@@ -1,34 +1,54 @@
 /**
  * Reusable draggable panel wrapper. Renders a TUI-styled panel with a
  * title bar that can be grabbed to drag the panel around the screen.
+ * Supports minimize (collapse to title bar only) and position persistence.
  */
 
-import { createSignal, onMount, onCleanup, type JSX } from "solid-js";
+import { createSignal, type JSX } from "solid-js";
 import tui from "../styles/tui.module.css";
 
 interface DraggablePanelProps {
   title: string;
-  /** Initial CSS position values */
+  /** Extra content rendered after the title text in the title bar */
+  titleExtra?: JSX.Element;
+  /** Initial CSS position values (used when x/y not provided) */
   initialX?: number;
   initialY?: number;
+  /** Controlled position — overrides initialX/initialY */
+  x?: number;
+  y?: number;
+  /** Called whenever the panel is dragged to a new position */
+  onPositionChange?: (x: number, y: number) => void;
   width?: string;
   zIndex?: number;
   maxHeight?: string;
+  minimizable?: boolean;
+  borderColor?: string;
   onClose?: () => void;
   children: JSX.Element;
 }
 
 export default function DraggablePanel(props: DraggablePanelProps) {
-  const [x, setX] = createSignal(props.initialX ?? 100);
-  const [y, setY] = createSignal(props.initialY ?? 100);
+  const [x, setX] = createSignal(props.x ?? props.initialX ?? 100);
+  const [y, setY] = createSignal(props.y ?? props.initialY ?? 100);
+  const [minimized, setMinimized] = createSignal(false);
 
   let dragging = false;
   let offsetX = 0;
   let offsetY = 0;
 
+  function updatePos(nx: number, ny: number) {
+    const cx = Math.max(0, Math.min(window.innerWidth - 60, nx));
+    const cy = Math.max(0, Math.min(window.innerHeight - 30, ny));
+    setX(cx);
+    setY(cy);
+    props.onPositionChange?.(cx, cy);
+  }
+
   function onPointerDown(e: PointerEvent) {
-    // Only drag on left mouse button
     if (e.button !== 0) return;
+    // Don't start drag when clicking buttons in the title bar
+    if ((e.target as HTMLElement).closest("button")) return;
     dragging = true;
     offsetX = e.clientX - x();
     offsetY = e.clientY - y();
@@ -38,11 +58,7 @@ export default function DraggablePanel(props: DraggablePanelProps) {
 
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
-    const nx = e.clientX - offsetX;
-    const ny = e.clientY - offsetY;
-    // Clamp to viewport
-    setX(Math.max(0, Math.min(window.innerWidth - 60, nx)));
-    setY(Math.max(0, Math.min(window.innerHeight - 30, ny)));
+    updatePos(e.clientX - offsetX, e.clientY - offsetY);
   }
 
   function onPointerUp() {
@@ -60,8 +76,9 @@ export default function DraggablePanel(props: DraggablePanelProps) {
         "z-index": (props.zIndex ?? 200).toString(),
         display: "flex",
         "flex-direction": "column",
-        "max-height": props.maxHeight ?? "calc(100vh - 40px)",
+        "max-height": minimized() ? "auto" : (props.maxHeight ?? "calc(100vh - 40px)"),
         "user-select": "none",
+        ...(props.borderColor ? { "border-color": props.borderColor } : {}),
       }}
     >
       {/* Drag handle / title bar */}
@@ -75,37 +92,56 @@ export default function DraggablePanel(props: DraggablePanelProps) {
           "align-items": "center",
           padding: "6px 10px",
           cursor: "grab",
-          "border-bottom": "1px solid #333333",
+          "border-bottom": minimized() ? "none" : "1px solid #333333",
           "flex-shrink": "0",
         }}
       >
-        <span class={tui.accent} style={{ "font-size": "12px", "font-weight": "600" }}>
-          {props.title}
+        <span style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+          <span class={tui.accent} style={{ "font-size": "12px", "font-weight": "600" }}>
+            {props.title}
+          </span>
+          {props.titleExtra}
         </span>
-        {props.onClose && (
-          <button
-            class={tui.button}
-            onClick={(e) => {
-              e.stopPropagation();
-              props.onClose!();
-            }}
-            style={{ padding: "0px 6px", "font-size": "10px", "line-height": "1.2" }}
-          >
-            X
-          </button>
-        )}
+        <div style={{ display: "flex", gap: "4px" }}>
+          {props.minimizable !== false && (
+            <button
+              class={tui.button}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMinimized(!minimized());
+              }}
+              style={{ padding: "0px 6px", "font-size": "10px", "line-height": "1.2" }}
+            >
+              {minimized() ? "+" : "\u2013"}
+            </button>
+          )}
+          {props.onClose && (
+            <button
+              class={tui.button}
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onClose!();
+              }}
+              style={{ padding: "0px 6px", "font-size": "10px", "line-height": "1.2" }}
+            >
+              X
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Content */}
-      <div
-        style={{
-          padding: "10px",
-          "overflow-y": "auto",
-          flex: "1",
-        }}
-      >
-        {props.children}
-      </div>
+      {!minimized() && (
+        <div
+          style={{
+            padding: "10px",
+            "overflow-y": "auto",
+            flex: "1",
+          }}
+        >
+          {props.children}
+        </div>
+      )}
     </div>
   );
 }

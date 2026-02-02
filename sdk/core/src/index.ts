@@ -73,6 +73,8 @@ export {
 
 export {
   computePlanetHash,
+  computePropertyHash,
+  mixHashBytes,
   determineCelestialBody,
   baseStats,
   applyCometBoosts,
@@ -104,8 +106,8 @@ export type { DiscoveredPlanet } from "./crypto/fog.js";
 export {
   derivePlanetPublicKey,
   computeSharedSecret,
-  encryptFieldElement,
-  decryptFieldElement,
+  createPlanetCipher,
+  encryptForPlanet,
   decryptPlanetStatic,
   decryptPlanetDynamic,
   decryptPlanetState,

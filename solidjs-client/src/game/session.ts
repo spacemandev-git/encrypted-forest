@@ -18,9 +18,19 @@ import {
   buildCreateGameIx,
   buildInitPlayerIx,
   buildQueueInitSpawnPlanetIx,
+  buildQueueProcessMoveIx,
   findSpawnPlanet,
   computePlanetHash,
+  deriveCelestialBodyPDA,
+  derivePendingMovesPDA,
+  derivePendingMoveAccountPDA,
+  fetchPendingMovesMetadata,
+  computeDistance,
+  computeLandingSlot,
+  computeCurrentShips,
+  computeCurrentMetal,
 } from "@encrypted-forest/core";
+import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
 import { saveRecentGame } from "./history.js";
 import {
   setupEncryption,
@@ -29,7 +39,9 @@ import {
   generateComputationOffset,
   encryptAndPack,
   buildInitSpawnPlanetValues,
+  buildProcessMoveValues,
   x25519,
+  RescueCipher,
 } from "./arcium.js";
 
 // ---------------------------------------------------------------------------
@@ -128,12 +140,17 @@ async function queueSpawnPlanet(
   hashRounds: number
 ): Promise<void> {
   try {
-    const encCtx = await setupEncryption(connection, program.programId);
-
+    // Derive encryption key from planet hash (fog-of-war: knowing coords = decryption key)
     const planetHash = computePlanetHash(x, y, gameId, hashRounds);
+    const planetPubkey = x25519.getPublicKey(planetHash);
+    const encCtx = await setupEncryption(connection, program.programId);
+    // Use planet-hash-derived key for cipher (shared secret with MXE)
+    const sharedSecret = x25519.getSharedSecret(planetHash, encCtx.mxePublicKey);
+    const cipher = new RescueCipher(sharedSecret);
+
     const { nonce, nonceValue } = generateNonce();
     const values = buildInitSpawnPlanetValues(x, y, 0n, 0n);
-    const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
+    const { packed } = encryptAndPack(cipher, values, nonce);
 
     const computationOffset = generateComputationOffset();
     const arciumAccts = getArciumAccountAddresses(
@@ -153,7 +170,7 @@ async function queueSpawnPlanet(
         computationOffset: BigInt(computationOffset.toString()),
         planetHash,
         ciphertexts: packed,
-        pubkey: encCtx.publicKey,
+        pubkey: planetPubkey,
         nonce: nonceValue,
         observerPubkey,
       },
@@ -166,6 +183,135 @@ async function queueSpawnPlanet(
   } catch (e: any) {
     console.warn("initSpawnPlanet queue failed (non-blocking):", e.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Arcium process move helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Queue processMove MPC computation on-chain.
+ * Sends ships from source planet to target planet.
+ */
+export async function queueProcessMove(
+  program: Program,
+  connection: Connection,
+  keypair: Keypair,
+  gameId: bigint,
+  hashRounds: number,
+  source: PlanetEntry,
+  target: PlanetEntry,
+  shipsToSend: bigint,
+  metalToSend: bigint,
+  gameSpeed: bigint
+): Promise<void> {
+  const sourceX = source.discovery.x;
+  const sourceY = source.discovery.y;
+  const targetX = target.discovery.x;
+  const targetY = target.discovery.y;
+
+  const sourcePlanetHash = computePlanetHash(sourceX, sourceY, gameId, hashRounds);
+  const targetPlanetHash = computePlanetHash(targetX, targetY, gameId, hashRounds);
+
+  const [sourceBodyPDA] = deriveCelestialBodyPDA(gameId, sourcePlanetHash, program.programId);
+  const [sourcePendingPDA] = derivePendingMovesPDA(gameId, sourcePlanetHash, program.programId);
+  const [targetPendingPDA] = derivePendingMovesPDA(gameId, targetPlanetHash, program.programId);
+
+  // Fetch target's pending moves to predict moveId for PDA derivation
+  const targetPending = await fetchPendingMovesMetadata(program, gameId, targetPlanetHash);
+  const predictedMoveId = targetPending.nextMoveId + BigInt(targetPending.queuedCount);
+  const [moveAccountPDA] = derivePendingMoveAccountPDA(gameId, targetPlanetHash, predictedMoveId, program.programId);
+
+  // Get current slot
+  const currentSlot = BigInt(await connection.getSlot());
+
+  // Compute distance and landing slot
+  const distance = computeDistance(sourceX, sourceY, targetX, targetY);
+  const sourceState = source.decrypted;
+  const launchVelocity = sourceState ? sourceState.static.launchVelocity : 1n;
+  const landingSlot = computeLandingSlot(currentSlot, distance, launchVelocity, gameSpeed);
+
+  // Compute current ships/metal with lazy regen from on-chain snapshot
+  let currentShips: bigint;
+  let currentMetal: bigint;
+  if (sourceState) {
+    const lastSlot = 0n; // on-chain lastUpdatedSlot not directly exposed; use 0 as base
+    currentShips = computeCurrentShips(
+      sourceState.dynamic.shipCount,
+      sourceState.static.maxShipCapacity,
+      sourceState.static.shipGenSpeed,
+      lastSlot,
+      currentSlot,
+      gameSpeed
+    );
+    currentMetal = computeCurrentMetal(
+      sourceState.dynamic.metalCount,
+      sourceState.static.maxMetalCapacity,
+      sourceState.static.metalGenSpeed,
+      lastSlot,
+      currentSlot,
+      gameSpeed
+    );
+  } else {
+    currentShips = shipsToSend;
+    currentMetal = metalToSend;
+  }
+
+  // Get player ID and source planet ID from decrypted state
+  const playerId = sourceState ? sourceState.dynamic.ownerId : 0n;
+  const sourcePlanetId = 0n; // planet ID is the hash-based identifier
+
+  // Build move values for MPC circuit
+  const moveValues = buildProcessMoveValues(
+    playerId,
+    sourcePlanetId,
+    shipsToSend,
+    metalToSend,
+    sourceX,
+    sourceY,
+    targetX,
+    targetY
+  );
+
+  // Encrypt move values with session encryption context (NOT planet-hash-derived key)
+  const encCtx = await setupEncryption(connection, program.programId);
+  const { nonce, nonceValue } = generateNonce();
+  const { packed } = encryptAndPack(encCtx.cipher, moveValues, nonce);
+
+  const computationOffset = generateComputationOffset();
+  const arciumAccts = getArciumAccountAddresses(
+    program.programId,
+    computationOffset,
+    "process_move"
+  );
+
+  await buildQueueProcessMoveIx(
+    program,
+    keypair.publicKey,
+    {
+      gameId,
+      computationOffset: BigInt(computationOffset.toString()),
+      landingSlot,
+      currentShips,
+      currentMetal,
+      moveCts: packed,
+      movePubkey: encCtx.publicKey,
+      moveNonce: nonceValue,
+      sourceBody: sourceBodyPDA,
+      sourcePending: sourcePendingPDA,
+      targetPending: targetPendingPDA,
+      moveAccount: moveAccountPDA,
+    },
+    arciumAccts
+  )
+    .signers([keypair])
+    .rpc({ skipPreflight: true, commitment: "confirmed" });
+
+  console.log(
+    "processMove queued:",
+    `(${sourceX},${sourceY}) → (${targetX},${targetY})`,
+    `ships=${shipsToSend}`
+  );
 }
 
 // ---------------------------------------------------------------------------

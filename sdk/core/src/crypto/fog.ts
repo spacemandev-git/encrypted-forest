@@ -9,6 +9,7 @@ import type { NoiseThresholds } from "../types/game.js";
 import type { CelestialBodyProperties } from "../types/celestialBody.js";
 import {
   computePlanetHash,
+  computePropertyHash,
   determineCelestialBody,
   scanCoordinate,
   scanRange,
@@ -94,7 +95,8 @@ export function revealPlanet(
     return null;
   }
 
-  const properties = determineCelestialBody(hash, thresholds);
+  const propHash = computePropertyHash(x, y, gameId, rounds);
+  const properties = determineCelestialBody(propHash, thresholds);
   if (properties === null) {
     return null;
   }
@@ -115,6 +117,7 @@ export {
   findSpawnPlanet,
   findPlanetOfType,
   computePlanetHash,
+  computePropertyHash,
   determineCelestialBody,
   derivePlanetKeySeed,
   verifyPlanetHash,

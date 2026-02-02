@@ -212,7 +212,7 @@ export function asteroidRing(scale: number = 1, count: number = 8): ShapeData {
     const angle = (2 * Math.PI * i) / count;
     const r = scale * 0.9;
     const cx = r * Math.cos(angle);
-    const cy = (Math.random() - 0.5) * scale * 0.2;
+    const cy = (((i * 7 + 3) % count) / count - 0.5) * scale * 0.2;
     const cz = r * Math.sin(angle);
     const base = vertices.length;
 

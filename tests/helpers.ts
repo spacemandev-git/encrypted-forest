@@ -319,6 +319,8 @@ export {
 
   // Noise / game mechanics
   computePlanetHash,
+  computePropertyHash,
+  mixHashBytes,
   determineCelestialBody,
   baseStats,
   applyCometBoosts,
@@ -338,8 +340,8 @@ export {
   verifyPlanetHash,
   derivePlanetPublicKey,
   computeSharedSecret,
-  encryptFieldElement,
-  decryptFieldElement,
+  createPlanetCipher,
+  encryptForPlanet,
   decryptPlanetStatic,
   decryptPlanetDynamic,
   decryptPlanetState,
@@ -596,7 +598,8 @@ export async function initPlayer(
 export function findDeadSpace(
   gameId: bigint,
   thresholds: NoiseThresholds,
-  mapDiameter: number = 1000
+  mapDiameter: number = 1000,
+  rounds: number = 1
 ): { x: bigint; y: bigint; hash: Uint8Array } {
   const half = Math.floor(mapDiameter / 2);
 
@@ -604,8 +607,9 @@ export function findDeadSpace(
     const x = BigInt((attempt % mapDiameter) - half);
     const y = BigInt(Math.floor(attempt / mapDiameter) - half);
 
-    const hash = computePlanetHash(x, y, gameId);
-    const props = determineCelestialBody(hash, thresholds);
+    const hash = computePlanetHash(x, y, gameId, rounds);
+    const propHash = computePropertyHash(x, y, gameId, rounds);
+    const props = determineCelestialBody(propHash, thresholds);
 
     if (props === null) {
       return { x, y, hash };

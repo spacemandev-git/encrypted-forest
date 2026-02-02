@@ -7,6 +7,7 @@
  */
 
 import { blake3 } from "@noble/hashes/blake3.js";
+import { sha3_256 } from "@noble/hashes/sha3.js";
 import type { NoiseThresholds } from "../types/game.js";
 import {
   CelestialBodyType,
@@ -43,6 +44,41 @@ export function computePlanetHash(
   }
   return hash;
 }
+
+// ---------------------------------------------------------------------------
+// MPC-compatible SHA3-256 hash (must match encrypted-ixs/src/lib.rs compute_property_hash)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the MPC-compatible SHA3-256 property hash for a coordinate.
+ * Must match the Arcis MPC circuit's `compute_property_hash` exactly.
+ *
+ * Input: 32 bytes = x LE i64 (8) || y LE i64 (8) || gameId LE u64 (8) || zeros (8)
+ * Iterated: hash_0 = sha3_256(input), hash_n = sha3_256(hash_{n-1})
+ * Returns 32-byte hash; bytes [0..5] are used for property determination.
+ */
+export function computePropertyHash(
+  x: bigint,
+  y: bigint,
+  gameId: bigint,
+  rounds: number = 1
+): Uint8Array {
+  const buf = new ArrayBuffer(32);
+  const view = new DataView(buf);
+  view.setBigInt64(0, x, true);    // x as i64 LE
+  view.setBigInt64(8, y, true);    // y as i64 LE
+  view.setBigUint64(16, gameId, true); // gameId as u64 LE
+  // bytes 24..31 are zero (padding)
+
+  let hash = sha3_256(new Uint8Array(buf));
+  for (let r = 1; r < rounds; r++) {
+    hash = sha3_256(hash);
+  }
+  return hash;
+}
+
+/** @deprecated Use computePropertyHash instead. */
+export const mixHashBytes = computePropertyHash;
 
 // ---------------------------------------------------------------------------
 // Comet determination helper
@@ -356,6 +392,8 @@ export interface ScannedCoordinate {
 
 /**
  * Scan a single coordinate and return its properties.
+ * Uses SHA3-256 for property determination (matching MPC circuit)
+ * and blake3 hash for PDA seed / decryption key.
  */
 export function scanCoordinate(
   x: bigint,
@@ -365,13 +403,15 @@ export function scanCoordinate(
   rounds: number = 1
 ): ScannedCoordinate {
   const hash = computePlanetHash(x, y, gameId, rounds);
-  const properties = determineCelestialBody(hash, thresholds);
+  const propHash = computePropertyHash(x, y, gameId, rounds);
+  const properties = determineCelestialBody(propHash, thresholds);
   return { x, y, hash, properties };
 }
 
 /**
  * Scan a rectangular range of coordinates.
  * Returns only coordinates that contain celestial bodies (non-dead-space).
+ * Property determination uses SHA3-256 (matching MPC circuit).
  */
 export function scanRange(
   startX: bigint,
@@ -397,6 +437,7 @@ export function scanRange(
 /**
  * Find a valid spawn planet (Miniscule Planet, size 1).
  * Scans coordinates sequentially until one is found.
+ * Uses SHA3-256 for property determination (matching MPC circuit).
  */
 export function findSpawnPlanet(
   gameId: bigint,
@@ -414,14 +455,15 @@ export function findSpawnPlanet(
     if (x < -BigInt(half) || x > BigInt(half)) continue;
     if (y < -BigInt(half) || y > BigInt(half)) continue;
 
-    const hash = computePlanetHash(x, y, gameId, rounds);
-    const properties = determineCelestialBody(hash, thresholds);
+    const propHash = computePropertyHash(x, y, gameId, rounds);
+    const properties = determineCelestialBody(propHash, thresholds);
 
     if (
       properties !== null &&
       properties.bodyType === CelestialBodyType.Planet &&
       properties.size === 1
     ) {
+      const hash = computePlanetHash(x, y, gameId, rounds);
       return { x, y, hash, properties };
     }
   }
@@ -433,6 +475,7 @@ export function findSpawnPlanet(
 
 /**
  * Find a planet of a specific type and minimum size.
+ * Uses SHA3-256 for property determination (matching MPC circuit).
  */
 export function findPlanetOfType(
   gameId: bigint,
@@ -457,14 +500,15 @@ export function findPlanetOfType(
     if (x < -BigInt(half) || x > BigInt(half)) continue;
     if (y < -BigInt(half) || y > BigInt(half)) continue;
 
-    const hash = computePlanetHash(x, y, gameId, rounds);
-    const properties = determineCelestialBody(hash, thresholds);
+    const propHash = computePropertyHash(x, y, gameId, rounds);
+    const properties = determineCelestialBody(propHash, thresholds);
 
     if (
       properties !== null &&
       properties.bodyType === bodyType &&
       properties.size >= minSize
     ) {
+      const hash = computePlanetHash(x, y, gameId, rounds);
       return { x, y, hash, properties };
     }
   }

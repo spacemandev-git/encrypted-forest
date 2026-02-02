@@ -4,7 +4,7 @@
 
 import { onMount, onCleanup } from "solid-js";
 import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
-import { TuiCanvas, type TuiCanvasOptions } from "../renderer/TuiCanvas.js";
+import { TuiCanvas, type TuiCanvasOptions, type TargetingInfo } from "../renderer/TuiCanvas.js";
 
 interface GameCanvasProps {
   getPlanets: () => ReadonlyMap<string, PlanetEntry>;
@@ -12,6 +12,7 @@ interface GameCanvasProps {
   getMapDiameter: () => number;
   getPlayerId: () => bigint | null;
   getSelectedHash: () => string | null;
+  getTargetingInfo?: () => TargetingInfo | null;
   onCellClick?: (gridX: number, gridY: number) => void;
   ref?: (renderer: TuiCanvas) => void;
 }
@@ -27,6 +28,7 @@ export default function GameCanvas(props: GameCanvasProps) {
       getMapDiameter: props.getMapDiameter,
       getPlayerId: props.getPlayerId,
       getSelectedHash: props.getSelectedHash,
+      getTargetingInfo: props.getTargetingInfo,
       onCellClick: props.onCellClick,
     });
 
