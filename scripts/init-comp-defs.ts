@@ -28,6 +28,7 @@ import {
   getCompDefAccOffset,
   getArciumProgramId,
   getLookupTableAddress,
+  getArciumProgram,
 } from "@arcium-hq/client";
 
 import idlJson from "../target/idl/encrypted_forest.json";
@@ -48,8 +49,10 @@ async function main() {
 
   const program = new Program(idlJson as any, provider);
   const mxeAccount = getMXEAccAddress(program.programId);
-  const arciumProgram = getArciumProgramId();
-  const addressLookupTable = getLookupTableAddress(program.programId);
+  const arciumProgramId = getArciumProgramId();
+  const arciumProg = getArciumProgram(provider);
+  const mxeAcc = await arciumProg.account.mxeAccount.fetch(mxeAccount);
+  const addressLookupTable = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
   const lutProgram = new PublicKey("AddressLookupTab1e1111111111111111111111111");
 
   const compDefNames = [
@@ -88,7 +91,7 @@ async function main() {
           addressLookupTable,
           lutProgram,
           systemProgram: SystemProgram.programId,
-          arciumProgram,
+          arciumProgram: arciumProgramId,
         })
         .signers([admin])
         .rpc({ commitment: "confirmed" });

@@ -15,7 +15,7 @@
     "@solana/web3.js": "^1.98.0",
     "@noble/hashes": "^2.0.1",
     "@noble/curves": "^2.0.0",
-    "@arcium-hq/client": "0.6.5"
+    "@arcium-hq/client": "0.8.5"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

@@ -35,3 +35,6 @@ sdk/client/src/idl/
 .wrangler
 artifacts/
 keypairs/*
+# Compiled Arcis circuits (large binaries; rebuilt via `make build` / fetched from circuit URL)
+build/*.arcis
+build/*.arcis.ir

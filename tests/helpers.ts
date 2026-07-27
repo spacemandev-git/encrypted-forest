@@ -29,6 +29,7 @@ import {
   getMXEPublicKey,
   getArciumProgramId,
   getLookupTableAddress,
+  getArciumProgram,
   RescueCipher,
   x25519,
   deserializeLE,
@@ -681,8 +682,10 @@ export async function initAllCompDefs(
   circuitBaseUrl: string = DEFAULT_CIRCUIT_BASE_URL
 ): Promise<void> {
   const mxeAccount = getMXEAccAddress(program.programId);
-  const arciumProgram = getArciumProgramId();
-  const addressLookupTable = getLookupTableAddress(program.programId);
+  const arciumProgramId = getArciumProgramId();
+  const arciumProg = getArciumProgram(program.provider as anchor.AnchorProvider);
+  const mxeAcc = await arciumProg.account.mxeAccount.fetch(mxeAccount);
+  const addressLookupTable = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
   const lutProgram = new PublicKey("AddressLookupTab1e1111111111111111111111111");
 
   const compDefNames = [
@@ -716,7 +719,7 @@ export async function initAllCompDefs(
           addressLookupTable,
           lutProgram,
           systemProgram: SystemProgram.programId,
-          arciumProgram,
+          arciumProgram: arciumProgramId,
         })
         .signers([payer])
         .rpc({ commitment: "confirmed" });

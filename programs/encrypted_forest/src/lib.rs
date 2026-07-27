@@ -1271,7 +1271,7 @@ pub struct InitInitPlanetCompDef<'info> {
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!())]
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
     /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     /// CHECK: lut_program
@@ -1291,7 +1291,7 @@ pub struct InitInitSpawnPlanetCompDef<'info> {
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!())]
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
     /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     /// CHECK: lut_program
@@ -1311,7 +1311,7 @@ pub struct InitProcessMoveCompDef<'info> {
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!())]
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
     /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     /// CHECK: lut_program
@@ -1331,7 +1331,7 @@ pub struct InitFlushPlanetCompDef<'info> {
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!())]
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
     /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     /// CHECK: lut_program
@@ -1351,7 +1351,7 @@ pub struct InitUpgradePlanetCompDef<'info> {
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!())]
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
     /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     /// CHECK: lut_program
