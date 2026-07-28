@@ -4,7 +4,7 @@
  * Creates a new game instance. Permissionless.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import type { NoiseThresholds, WinCondition } from "../types/game.js";
 import { deriveGamePDA } from "../utils/pda.js";

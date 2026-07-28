@@ -7,7 +7,7 @@
 
 import { createSignal, createMemo, type Accessor } from "solid-js";
 import { Connection, PublicKey, Keypair, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
-import { Program, AnchorProvider } from "@coral-xyz/anchor";
+import { Program, AnchorProvider } from "@anchor-lang/core";
 import type { Game, NoiseThresholds, CreateGameArgs, ScannedCoordinate } from "@encrypted-forest/core";
 import {
   DEFAULT_THRESHOLDS,

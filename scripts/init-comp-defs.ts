@@ -14,7 +14,7 @@
  *   bun run scripts/init-comp-defs.ts
  */
 
-import { Program, AnchorProvider, Wallet } from "@coral-xyz/anchor";
+import { Program, AnchorProvider, Wallet } from "@anchor-lang/core";
 import {
   Connection,
   Keypair,

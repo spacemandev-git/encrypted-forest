@@ -2,7 +2,7 @@
  * Game account fetching and deserialization.
  */
 
-import { type Program } from "@coral-xyz/anchor";
+import { type Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 import type { Game, NoiseThresholds } from "../types/game.js";
 import { deriveGamePDA } from "../utils/pda.js";

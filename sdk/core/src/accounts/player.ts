@@ -2,7 +2,7 @@
  * Player account fetching and deserialization.
  */
 
-import { type Program } from "@coral-xyz/anchor";
+import { type Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 import type { Player } from "../types/player.js";
 import { derivePlayerPDA } from "../utils/pda.js";

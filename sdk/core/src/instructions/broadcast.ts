@@ -4,7 +4,7 @@
  * Broadcast planet coordinates publicly so all players can discover it.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 import { deriveGamePDA } from "../utils/pda.js";
 

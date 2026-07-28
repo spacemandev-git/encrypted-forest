@@ -2,7 +2,7 @@
  * EncryptedCelestialBody account fetching and deserialization.
  */
 
-import { type Program } from "@coral-xyz/anchor";
+import { type Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 import type { EncryptedCelestialBodyAccount } from "../types/celestialBody.js";
 import { deriveCelestialBodyPDA } from "../utils/pda.js";

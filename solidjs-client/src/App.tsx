@@ -16,7 +16,7 @@ import {
   Match,
 } from "solid-js";
 import { Connection, Keypair } from "@solana/web3.js";
-import { Program, AnchorProvider } from "@coral-xyz/anchor";
+import { Program, AnchorProvider } from "@anchor-lang/core";
 import type { TuiCanvas } from "./renderer/TuiCanvas.js";
 import type { PlanetEntry } from "@encrypted-forest/solidjs-sdk";
 import type {

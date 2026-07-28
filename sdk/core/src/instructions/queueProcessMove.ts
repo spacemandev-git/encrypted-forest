@@ -16,7 +16,7 @@
  * landing_slot is a public parameter validated by the circuit.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { deriveGamePDA } from "../utils/pda.js";
 import type { ArciumAccounts } from "./arciumAccounts.js";

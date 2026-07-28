@@ -19,7 +19,7 @@
  *   bun run scripts/e2e-game.ts
  */
 
-import { Program, AnchorProvider, BN, Wallet } from "@coral-xyz/anchor";
+import { Program, AnchorProvider, BN, Wallet } from "@anchor-lang/core";
 import {
   Connection,
   Keypair,

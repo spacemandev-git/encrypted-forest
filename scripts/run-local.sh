@@ -37,18 +37,39 @@ NODE_OFFSET_START=1
 # to ensure QUIC source-IP is correct on the bridge interface.
 NODE_IPS=("172.20.0.100" "172.20.0.101" "172.20.0.102")
 
-# Recovery: init-arcium-network creates 3 system nodes outside the main cluster.
-# Node-4 goes into a separate "recovery cluster" (offset 1) so its ARX process can boot
-# (ARX nodes require cluster membership to initialize), but it's NOT in the main cluster.
-# Total outside main cluster: 3 system + 1 recovery-cluster node = 4.
-RECOVERY_SET_SIZE=4
+# MXE recovery set. Since v0.11 this is NOT drawn from ARX nodes or clusters: it
+# is a set of separately registered RecoveryPeerAccounts, each backed by its own
+# staking account (a stake account cannot back both an ARX node and a recovery
+# peer). `init-mxe` rejects anything smaller than 7 for a 3-node cluster.
+RECOVERY_SET_SIZE=7
+NUM_RECOVERY_PEERS=7
+RECOVERY_PEER_OFFSET_START=1
+RECOVERY_KEYS_DIR="${ARX_KEYS_DIR}/recovery-peers"
+
+# Extra (non-cluster) ARX nodes. Kept at 0: an ARX process refuses to boot unless
+# it belongs to a cluster, a cluster needs >= 2 nodes, and extra nodes no longer
+# contribute to the MXE recovery set.
 RECOVERY_CLUSTER_OFFSET=1
-NUM_EXTRA_NODES=1
+NUM_EXTRA_NODES=0
 EXTRA_NODE_OFFSET_START=4
 EXTRA_NODE_IPS=("172.20.0.103")
 
 # Trusted Dealer config (keys used by Docker container)
 TD_DIR="${ARX_KEYS_DIR}/trusted-dealer"
+
+# Staking (v0.11+): a node only activates with a primary self-delegation of at
+# least MIN_SELF_DELEGATION (1000 ARX). Amounts are in whole ARX.
+#
+# The released CLI is not compiled with the `staking` feature, so `arcium
+# init-arcium-mint` / `arcium airdrop` both bail out with "unexpected command
+# routed to staking handler". We don't need them: Surfpool forks mainnet, so the
+# real ARX mint and staking program are already present, and we mint balances
+# directly with Surfpool's surfnet_setTokenAccount cheatcode.
+NODE_STAKE_ARX=1000
+ARCIUM_PROGRAM_ID="Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ"
+ARX_MINT="ARXwZkNAtzPfdcoqQiduJn8EPv9fKiDfGn2KyggyDrFs"
+ARX_DECIMALS=9
+ARX_FUND_AMOUNT=100000   # whole ARX given to each node authority
 
 # ---------------------------------------------------------------------------
 # Flags
@@ -271,8 +292,13 @@ wait_for_rpc() {
   local max_retries=${1:-60}
   local retry=0
   task "Waiting for RPC at ${RPC_URL}"
+  # Poll a real JSON-RPC call: Surfpool binds the port well before it can serve
+  # requests, and `GET /health` answers "HTTP method not allowed" the whole time,
+  # which curl reports as success.
   while [ $retry -lt $max_retries ]; do
-    if curl -s "${RPC_URL}/health" > /dev/null 2>&1; then
+    if curl -s "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+         -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' 2>/dev/null \
+         | grep -q '"result"'; then
       ok "RPC is ready"
       return 0
     fi
@@ -289,6 +315,39 @@ airdrop_sol() {
   local addr
   addr=$(solana address --keypair "$keypair_path")
   solana airdrop "$amount_sol" "$addr" --url "$RPC_URL" --commitment confirmed >> "$VERBOSE_LOG" 2>&1 || true
+}
+
+# Iterate 1..N, emitting nothing for N < 1. BSD `seq` counts DOWN when the end is
+# below the start (`seq 1 0` prints "1 0"), which silently runs zero-count loops.
+seq_n() {
+  if [ "${1:-0}" -ge 1 ]; then
+    seq 1 "$1"
+  fi
+}
+
+# Register one ARX node on-chain. `init-arx-accs` is not idempotent: on a re-run
+# against a persisted Surfpool DB the primary stake account already exists and
+# the whole command aborts, so retry once skipping the staking steps.
+init_node_accounts() {
+  local node_dir="$1"
+  local node_offset="$2"
+  local ip="$3"
+  local common=(
+    --keypair-path "${node_dir}/node-keypair.json"
+    --callback-keypair-path "${node_dir}/callback-kp.json"
+    --peer-keypair-path "${node_dir}/identity.pem"
+    --bls-keypair-path "${node_dir}/bls-keypair.json"
+    --x25519-keypair-path "${node_dir}/x25519-keypair.json"
+    --amount "$NODE_STAKE_ARX"
+    --node-offset "$node_offset"
+    --ip-address "$ip"
+    --rpc-url "$RPC_URL"
+  )
+  if arcium init-arx-accs "${common[@]}" >> "$VERBOSE_LOG" 2>&1; then
+    return 0
+  fi
+  arcium init-arx-accs "${common[@]}" \
+    --skip-steps init-stake,activate-stake >> "$VERBOSE_LOG" 2>&1
 }
 
 run_parallel() {
@@ -382,33 +441,32 @@ generate_node_keys() {
   if [ -d "${node_dir}/node-config.toml" ]; then
     rm -rf "${node_dir}/node-config.toml"
   fi
+  # v0.13 node-config format. The [network] section and the `cluster`,
+  # `commitment`, `hardware_claim`, `starting_epoch`, `ending_epoch` fields were
+  # removed after v0.7 — the node refuses to parse a config that still has them.
+  # All six fields below are required; a missing one is a hard parse error.
+  # ${bind_ip} is unused now (the node binds 0.0.0.0); the node's routable IP is
+  # the one registered on-chain via `init-arx-accs --ip-address`.
   cat > "${node_dir}/node-config.toml" << NCEOF
-[network]
-address = "${bind_ip}"
-
 [node]
-ending_epoch = 9223372036854775807
-hardware_claim = 0
 offset = ${node_offset}
-starting_epoch = 0
+computations_limit = 10
 
 [solana]
-cluster = "Localnet"
 endpoint_rpc = "http://${RPC_HOST}:8899"
 endpoint_wss = "ws://${RPC_HOST}:8900"
-
-[solana.commitment]
-commitment = "confirmed"
+secondary_endpoint_rpc = "http://${RPC_HOST}:8899"
+secondary_endpoint_wss = "ws://${RPC_HOST}:8900"
 NCEOF
 }
 
 task "Generating keys for ${NUM_NODES} cluster nodes + ${NUM_EXTRA_NODES} extra node(s)"
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   node_offset=$((NODE_OFFSET_START + i - 1))
   ip_idx=$((i - 1))
   generate_node_keys "$i" "$node_offset" "${NODE_IPS[$ip_idx]}"
 done
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   extra_num=$((NUM_NODES + i))
   node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
   ip_idx=$((i - 1))
@@ -512,7 +570,7 @@ wait_for_rpc 60 || fail "Surfpool did not become healthy. Check ${SURFPOOL_LOG}"
 TOTAL_NODES=$((NUM_NODES + NUM_EXTRA_NODES))
 task "Airdropping SOL to ${TOTAL_NODES} nodes"
 AIRDROP_PIDS=()
-for i in $(seq 1 $TOTAL_NODES); do
+for i in $(seq_n $TOTAL_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
   airdrop_sol "${node_dir}/node-keypair.json" 100 &
   AIRDROP_PIDS+=($!)
@@ -530,57 +588,92 @@ step_done
 step_start 5 "Initializing Arcium network"
 
 # 5a. Deploy Arcium network programs
+#
+# Surfpool is a mainnet fork, so it lazily clones real mainnet accounts on
+# demand — including the Arcium network's own state accounts. `init-arcium-network`
+# then dies with "Allocate: account <addr> already in use" on the first one it
+# tries to create, leaving the rest of the network state (e.g.
+# permissioned_recovery_peers_acc) uncreated. Wipe each cloned account with
+# Surfpool's surfnet_setAccount cheatcode and retry until init goes through.
 task "Deploying Arcium network programs"
-arcium init-arcium-network \
-  --keypair-path "$ADMIN_KP" \
-  --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || {
-    warn "init-arcium-network may have already been run (OK if re-running)"
-  }
-ok "Arcium network initialized"
+NETWORK_INIT_OK=false
+for attempt in $(seq 1 15); do
+  net_out=$(arcium init-arcium-network --keypair-path "$ADMIN_KP" --rpc-url "$RPC_URL" 2>&1) || true
+  echo "$net_out" >> "$VERBOSE_LOG"
+  if echo "$net_out" | grep -q "Arcium network initialized"; then
+    NETWORK_INIT_OK=true
+    break
+  fi
+  conflict_addr=$(echo "$net_out" \
+    | grep -oE "Allocate: account Address \{ address: [1-9A-HJ-NP-Za-km-z]+" \
+    | grep -oE "[1-9A-HJ-NP-Za-km-z]{32,44}$" | head -1) || true
+  if [ -z "$conflict_addr" ]; then
+    warn "init-arcium-network failed for a reason other than a cloned account — see ${VERBOSE_LOG}"
+    break
+  fi
+  echo "  clearing mainnet-cloned account ${conflict_addr}" >> "$VERBOSE_LOG"
+  curl -s "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"surfnet_setAccount\",\"params\":[\"${conflict_addr}\",{\"lamports\":0,\"owner\":\"11111111111111111111111111111111\",\"data\":\"\",\"executable\":false,\"rentEpoch\":0}]}" \
+    >> "$VERBOSE_LOG" 2>&1
+done
+if [ "$NETWORK_INIT_OK" = true ]; then
+  ok "Arcium network initialized"
+else
+  fail "Could not initialize the Arcium network. See ${VERBOSE_LOG}"
+fi
+
+# 5a-bis. Fund every node authority with ARX.
+# Staking is mandatory since v0.11: `init-arx-accs` opens + activates a primary
+# stake account, which needs ARX tokens in the node authority's wallet.
+task "Funding ${TOTAL_NODES} nodes with ${ARX_FUND_AMOUNT} ARX each"
+ARX_BASE_UNITS=$(python3 -c "print(${ARX_FUND_AMOUNT} * 10**${ARX_DECIMALS})")
+for i in $(seq_n $TOTAL_NODES); do
+  node_dir="${ARX_KEYS_DIR}/node-${i}"
+  node_addr=$(solana address --keypair "${node_dir}/node-keypair.json")
+  resp=$(curl -s "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"surfnet_setTokenAccount\",\"params\":[\"${node_addr}\",\"${ARX_MINT}\",{\"amount\":${ARX_BASE_UNITS}}]}")
+  echo "surfnet_setTokenAccount ${node_addr}: ${resp}" >> "$VERBOSE_LOG"
+  case "$resp" in
+    *'"error"'*) fail "Could not fund node ${i} with ARX: ${resp}" ;;
+  esac
+done
+ok "ARX balances set"
 
 # 5b. Initialize all ARX node accounts on-chain (cluster + extra, parallel)
 task "Initializing on-chain accounts for ${TOTAL_NODES} nodes"
 NODE_PIDS=()
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
   node_offset=$((NODE_OFFSET_START + i - 1))
   ip_idx=$((i - 1))
   ip="${NODE_IPS[$ip_idx]}"
 
-  (
-    arcium init-arx-accs \
-      --keypair-path "${node_dir}/node-keypair.json" \
-      --callback-keypair-path "${node_dir}/callback-kp.json" \
-      --peer-keypair-path "${node_dir}/identity.pem" \
-      --bls-keypair-path "${node_dir}/bls-keypair.json" \
-      --x25519-keypair-path "${node_dir}/x25519-keypair.json" \
-      --node-offset "$node_offset" \
-      --ip-address "$ip" \
-      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
-  ) &
+  init_node_accounts "$node_dir" "$node_offset" "$ip" &
   NODE_PIDS+=($!)
 done
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   extra_num=$((NUM_NODES + i))
   node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
   node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
   ip_idx=$((i - 1))
   ip="${EXTRA_NODE_IPS[$ip_idx]}"
 
-  (
-    arcium init-arx-accs \
-      --keypair-path "${node_dir}/node-keypair.json" \
-      --callback-keypair-path "${node_dir}/callback-kp.json" \
-      --peer-keypair-path "${node_dir}/identity.pem" \
-      --bls-keypair-path "${node_dir}/bls-keypair.json" \
-      --x25519-keypair-path "${node_dir}/x25519-keypair.json" \
-      --node-offset "$node_offset" \
-      --ip-address "$ip" \
-      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
-  ) &
+  init_node_accounts "$node_dir" "$node_offset" "$ip" &
   NODE_PIDS+=($!)
 done
 run_parallel "Initializing ARX node accounts" "${NODE_PIDS[@]}"
+
+# Hard-fail here rather than limping on: without these accounts every later step
+# (cluster join, BLS, activation) fails in ways that only surface as the ARX
+# nodes never going active.
+ALL_NODE_OFFSETS=()
+for i in $(seq_n $NUM_NODES); do ALL_NODE_OFFSETS+=($((NODE_OFFSET_START + i - 1))); done
+for i in $(seq_n $NUM_EXTRA_NODES); do ALL_NODE_OFFSETS+=($((EXTRA_NODE_OFFSET_START + i - 1))); done
+for offset in "${ALL_NODE_OFFSETS[@]}"; do
+  if ! arcium arx-info "$offset" --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
+    fail "ARX node account for offset ${offset} was not created. See ${VERBOSE_LOG}"
+  fi
+done
 ok "All node accounts initialized"
 
 # Get trusted dealer peer ID for cluster registration
@@ -604,7 +697,7 @@ ok "Main cluster created"
 # 5d. Propose all nodes, then accept all (parallel within each batch)
 task "Proposing ${NUM_NODES} nodes to main cluster"
 PROPOSE_PIDS=()
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   node_offset=$((NODE_OFFSET_START + i - 1))
   (
     arcium propose-join-cluster \
@@ -619,7 +712,7 @@ run_parallel "Proposing nodes to cluster" "${PROPOSE_PIDS[@]}"
 
 task "Nodes accepting main cluster join"
 JOIN_PIDS=()
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
   node_offset=$((NODE_OFFSET_START + i - 1))
   (
@@ -637,7 +730,7 @@ ok "All nodes joined main cluster"
 # 5e. Submit aggregated BLS key (each node submits, parallel)
 task "Submitting aggregated BLS keys for main cluster"
 BLS_PIDS=()
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   node_dir="${ARX_KEYS_DIR}/node-${i}"
   node_offset=$((NODE_OFFSET_START + i - 1))
 
@@ -663,7 +756,17 @@ arcium activate-cluster \
   }
 ok "Main cluster active"
 
-# 5g. Create recovery cluster for extra node(s) — ARX nodes must belong to a cluster to boot
+# 5g. Create recovery cluster for extra node(s) — ARX nodes must belong to a cluster to boot.
+#
+# A cluster needs at least 2 nodes (InitCluster rejects max-nodes=1 with
+# InvalidMaxSize), so this block is skipped for a single extra node. Note that
+# since v0.11 the MXE recovery set is NOT drawn from cluster members: it is built
+# from separately registered RecoveryPeerAccounts (`arcium init-recovery-peer`),
+# so an extra node in a recovery cluster no longer contributes to it.
+if [ "$NUM_EXTRA_NODES" -lt 2 ]; then
+  warn "Skipping recovery cluster: needs >= 2 nodes, have ${NUM_EXTRA_NODES}"
+  warn "Extra node(s) stay registered + active on-chain, but their ARX process will not boot ('Node is not part of any cluster')"
+else
 task "Creating recovery cluster (offset=${RECOVERY_CLUSTER_OFFSET})"
 arcium init-cluster \
   --keypair-path "$ADMIN_KP" \
@@ -679,7 +782,7 @@ ok "Recovery cluster created"
 # 5h. Propose extra nodes to recovery cluster, accept, submit BLS, activate
 task "Proposing ${NUM_EXTRA_NODES} extra node(s) to recovery cluster"
 EXTRA_PROPOSE_PIDS=()
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
   (
     arcium propose-join-cluster \
@@ -694,7 +797,7 @@ run_parallel "Proposing extra nodes to recovery cluster" "${EXTRA_PROPOSE_PIDS[@
 
 task "Extra nodes accepting recovery cluster join"
 EXTRA_JOIN_PIDS=()
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   extra_num=$((NUM_NODES + i))
   node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
   node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
@@ -712,7 +815,7 @@ ok "Extra nodes joined recovery cluster"
 
 task "Submitting BLS keys for recovery cluster"
 EXTRA_BLS_PIDS=()
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   extra_num=$((NUM_NODES + i))
   node_dir="${ARX_KEYS_DIR}/node-${extra_num}"
   node_offset=$((EXTRA_NODE_OFFSET_START + i - 1))
@@ -736,6 +839,86 @@ arcium activate-cluster \
     warn "Recovery cluster may already be active"
   }
 ok "Recovery cluster active"
+fi
+
+# 5i. Register the MXE recovery peers.
+#
+# `init-mxe --recovery-set-size N` needs N RecoveryPeerAccounts, each backed by
+# its own primary stake account. Registering one requires the peer to be on the
+# network's permissioned-recovery-peers allowlist, and the two instructions that
+# manage that allowlist are gated on the Arcium program's upgrade authority — so
+# hand that authority to admin.json first (Surfpool cheatcode), then allowlist
+# the peers from TypeScript (the CLI exposes no command for it).
+task "Handing Arcium program upgrade authority to admin"
+ADMIN_PUBKEY_FOR_AUTH=$(solana address --keypair "$ADMIN_KP")
+auth_resp=$(curl -s "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"surfnet_setProgramAuthority\",\"params\":[\"${ARCIUM_PROGRAM_ID}\",\"${ADMIN_PUBKEY_FOR_AUTH}\"]}")
+echo "surfnet_setProgramAuthority: ${auth_resp}" >> "$VERBOSE_LOG"
+case "$auth_resp" in
+  *'"error"'*) fail "Could not set Arcium program upgrade authority: ${auth_resp}" ;;
+esac
+ok "Upgrade authority set to ${ADMIN_PUBKEY_FOR_AUTH}"
+
+task "Generating + funding ${NUM_RECOVERY_PEERS} recovery peers"
+mkdir -p "$RECOVERY_KEYS_DIR"
+RECOVERY_PUBKEYS=""
+for i in $(seq_n $NUM_RECOVERY_PEERS); do
+  peer_dir="${RECOVERY_KEYS_DIR}/peer-${i}"
+  mkdir -p "$peer_dir"
+  if [ ! -f "${peer_dir}/keypair.json" ]; then
+    solana-keygen new --outfile "${peer_dir}/keypair.json" --no-bip39-passphrase --force >> "$VERBOSE_LOG" 2>&1
+  fi
+  if [ ! -f "${peer_dir}/x25519-keypair.json" ]; then
+    arcium generate-x25519 --output "${peer_dir}/x25519-keypair.json" >> "$VERBOSE_LOG" 2>&1
+  fi
+  peer_addr=$(solana address --keypair "${peer_dir}/keypair.json")
+  RECOVERY_PUBKEYS="${RECOVERY_PUBKEYS}${RECOVERY_PUBKEYS:+,}${peer_addr}"
+  airdrop_sol "${peer_dir}/keypair.json" 100
+  curl -s "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"surfnet_setTokenAccount\",\"params\":[\"${peer_addr}\",\"${ARX_MINT}\",{\"amount\":${ARX_BASE_UNITS}}]}" \
+    >> "$VERBOSE_LOG" 2>&1
+done
+ok "${NUM_RECOVERY_PEERS} recovery peers funded"
+
+task "Adding recovery peers to the permissioned allowlist"
+if ADMIN_KEYPAIR="$ADMIN_KP" \
+   ANCHOR_PROVIDER_URL="$RPC_URL" \
+   RECOVERY_PEER_PUBKEYS="$RECOVERY_PUBKEYS" \
+   bun run "${PROJECT_ROOT}/scripts/init-recovery-peers.ts" >> "$VERBOSE_LOG" 2>&1; then
+  ok "Recovery peers permissioned"
+else
+  fail "Could not permission the recovery peers. See ${VERBOSE_LOG}"
+fi
+
+task "Staking + registering ${NUM_RECOVERY_PEERS} recovery peers"
+RP_PIDS=()
+for i in $(seq_n $NUM_RECOVERY_PEERS); do
+  peer_dir="${RECOVERY_KEYS_DIR}/peer-${i}"
+  peer_offset=$((RECOVERY_PEER_OFFSET_START + i - 1))
+  (
+    # Idempotent: the stake account survives a re-run against a persisted DB.
+    arcium init-primary-stake \
+      --keypair-path "${peer_dir}/keypair.json" \
+      --amount "$NODE_STAKE_ARX" \
+      --fee-basis-points 0 \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1 || true
+    arcium init-recovery-peer \
+      --keypair-path "${peer_dir}/keypair.json" \
+      --peer-offset "$peer_offset" \
+      --x25519-keypair-path "${peer_dir}/x25519-keypair.json" \
+      --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1
+  ) &
+  RP_PIDS+=($!)
+done
+run_parallel "Registering recovery peers" "${RP_PIDS[@]}"
+
+for i in $(seq_n $NUM_RECOVERY_PEERS); do
+  peer_offset=$((RECOVERY_PEER_OFFSET_START + i - 1))
+  if ! arcium recovery-peer-info --peer-offset "$peer_offset" --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
+    fail "Recovery peer ${peer_offset} was not registered. See ${VERBOSE_LOG}"
+  fi
+done
+ok "All ${NUM_RECOVERY_PEERS} recovery peers registered"
 
 step_done
 
@@ -764,10 +947,10 @@ ok "Docker services started (or starting)"
 # Wait for all nodes (including extra nodes outside the cluster) to become active
 task "Waiting for all ARX nodes to become active"
 ALL_OFFSETS=()
-for i in $(seq 1 $NUM_NODES); do
+for i in $(seq_n $NUM_NODES); do
   ALL_OFFSETS+=($((NODE_OFFSET_START + i - 1)))
 done
-for i in $(seq 1 $NUM_EXTRA_NODES); do
+for i in $(seq_n $NUM_EXTRA_NODES); do
   ALL_OFFSETS+=($((EXTRA_NODE_OFFSET_START + i - 1)))
 done
 
@@ -841,8 +1024,10 @@ if [ "$SKIP_DEPLOY" = false ]; then
   }
   ok "Program deploy step complete"
 
-  # Initialize MXE separately with explicit --authority so admin.json is the MXE authority.
-  # This ensures init-comp-defs.ts (which signs with admin.json) passes the authority check.
+  # Initialize MXE separately. Since v0.13 there is no --authority flag: the
+  # signer becomes the MXE authority, and it must also be the program's upgrade
+  # authority. admin.json is both (it deployed the program), so init-comp-defs.ts
+  # (which signs with admin.json) passes the authority check.
   PROGRAM_ID=$(solana address --keypair "$PROGRAM_KP" 2>/dev/null || echo "")
   ADMIN_PUBKEY=$(solana address --keypair "$ADMIN_KP" 2>/dev/null || echo "")
   if [ -n "$PROGRAM_ID" ] && [ -n "$ADMIN_PUBKEY" ]; then
@@ -852,7 +1037,6 @@ if [ "$SKIP_DEPLOY" = false ]; then
       --cluster-offset "$CLUSTER_OFFSET" \
       --recovery-set-size "$RECOVERY_SET_SIZE" \
       --keypair-path "$ADMIN_KP" \
-      --authority "$ADMIN_PUBKEY" \
       --rpc-url "$RPC_URL" >> "$VERBOSE_LOG" 2>&1; then
       DEPLOY_OK=true
       ok "MXE initialized with admin authority"

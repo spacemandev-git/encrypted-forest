@@ -13,7 +13,7 @@
  *   current_slot, game_speed, last_updated_slot, flush_count
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import type { ArciumAccounts } from "./arciumAccounts.js";
 

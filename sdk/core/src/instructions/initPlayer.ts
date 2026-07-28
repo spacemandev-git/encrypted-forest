@@ -4,7 +4,7 @@
  * Creates a Player account for a game.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { deriveGamePDA, derivePlayerPDA } from "../utils/pda.js";
 

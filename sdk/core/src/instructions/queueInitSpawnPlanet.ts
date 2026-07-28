@@ -8,7 +8,7 @@
  * Plaintext params from Game account are passed by the on-chain program.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   deriveGamePDA,

@@ -9,8 +9,8 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import * as anchor from "@coral-xyz/anchor";
-import { Program, AnchorProvider, BN } from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
+import { Program, AnchorProvider, BN } from "@anchor-lang/core";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import type { EncryptedForest } from "../target/types/encrypted_forest";
 import {

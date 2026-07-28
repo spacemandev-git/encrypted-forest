@@ -7,7 +7,7 @@
  * - All PDA derivation fns from @arcium-hq/client are pure JS and work in browser
  */
 
-import { BN } from "@coral-xyz/anchor";
+import { BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import type { Connection } from "@solana/web3.js";
 import {
@@ -25,7 +25,7 @@ import {
   deserializeLE,
 } from "@arcium-hq/client";
 import type { ArciumAccounts } from "@encrypted-forest/core";
-import { AnchorProvider } from "@coral-xyz/anchor";
+import { AnchorProvider } from "@anchor-lang/core";
 
 // ---------------------------------------------------------------------------
 // Constants

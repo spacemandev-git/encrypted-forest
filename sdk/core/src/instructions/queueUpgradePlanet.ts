@@ -12,7 +12,7 @@
  *   player_id, focus, current_slot, game_speed, last_updated_slot, metal_upgrade_cost
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { deriveGamePDA } from "../utils/pda.js";
 import type { ArciumAccounts } from "./arciumAccounts.js";

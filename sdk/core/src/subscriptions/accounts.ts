@@ -6,7 +6,7 @@
  */
 
 import { Connection, PublicKey, type Commitment } from "@solana/web3.js";
-import type { Program } from "@coral-xyz/anchor";
+import type { Program } from "@anchor-lang/core";
 import {
   deriveGamePDA,
   derivePlayerPDA,

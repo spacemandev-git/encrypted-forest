@@ -4,7 +4,7 @@
  * Close game-related accounts after the game has ended to reclaim rent.
  */
 
-import { type Program, BN } from "@coral-xyz/anchor";
+import { type Program, BN } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 import {
   deriveGamePDA,

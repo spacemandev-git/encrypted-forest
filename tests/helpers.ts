@@ -6,8 +6,8 @@
  * is defined here. This ensures changes only need to happen in the SDK.
  */
 
-import * as anchor from "@coral-xyz/anchor";
-import { Program, AnchorProvider, BN, Wallet } from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
+import { Program, AnchorProvider, BN, Wallet } from "@anchor-lang/core";
 import {
   Connection,
   PublicKey,
@@ -546,7 +546,7 @@ export async function createGame(
       anchorThresholds,
       config.hashRounds
     )
-    .accounts({
+    .accountsPartial({
       admin: admin.publicKey,
       game: gamePDA,
       systemProgram: SystemProgram.programId,
@@ -927,7 +927,7 @@ export async function queueInitPlanet(
   const [planetPDA] = deriveCelestialBodyPDA(gameId, planetHash, program.programId);
   const [pendingMovesPDA] = derivePendingMovesPDA(gameId, planetHash, program.programId);
 
-  const nonce = randomBytes(16);
+  const nonce = new Uint8Array(randomBytes(16));
   const nonceValue = deserializeLE(nonce);
   const values = buildInitPlanetValues(x, y);
   const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
@@ -979,7 +979,7 @@ export async function queueInitSpawnPlanet(
   const [planetPDA] = deriveCelestialBodyPDA(gameId, planetHash, program.programId);
   const [pendingMovesPDA] = derivePendingMovesPDA(gameId, planetHash, program.programId);
 
-  const nonce = randomBytes(16);
+  const nonce = new Uint8Array(randomBytes(16));
   const nonceValue = deserializeLE(nonce);
   const values = buildInitSpawnPlanetValues(x, y, playerId, sourcePlanetId);
   const { packed } = encryptAndPack(encCtx.cipher, values, nonce);
@@ -1036,15 +1036,12 @@ export async function queueProcessMove(
   const targetPlanetHash = new Uint8Array(pendingData.planetHash);
   const [moveAccountPDA] = derivePendingMoveAccountPDA(gameId, targetPlanetHash, predictedMoveId, program.programId);
 
-  const moveNonce = randomBytes(16);
+  const moveNonce = new Uint8Array(randomBytes(16));
   const moveNonceValue = deserializeLE(moveNonce);
   const { packed: movePacked } = encryptAndPack(encCtx.cipher, moveValues, moveNonce);
 
   const computationOffset = new BN(randomBytes(8), "hex");
   const arciumAccts = getArciumAccountAddresses(program, computationOffset, "process_move");
-
-  const observerKey = x25519.utils.randomSecretKey();
-  const observerPubkey = x25519.getPublicKey(observerKey);
 
   await program.methods
     .queueProcessMove(
@@ -1054,8 +1051,7 @@ export async function queueProcessMove(
       new BN(currentMetal.toString()),
       Buffer.from(movePacked) as any,
       Array.from(encCtx.publicKey) as any,
-      new BN(moveNonceValue.toString()),
-      Array.from(observerPubkey) as any
+      new BN(moveNonceValue.toString())
     )
     .accountsPartial({
       payer: payer.publicKey,
@@ -1085,7 +1081,7 @@ export async function queueFlushPlanet(
   moveAccounts: PublicKey[],
   encCtx: EncryptionContext
 ): Promise<{ computationOffset: BN }> {
-  const flushNonce = randomBytes(16);
+  const flushNonce = new Uint8Array(randomBytes(16));
   const flushNonceValue = deserializeLE(flushNonce);
   const { packed: flushPacked } = encryptAndPack(encCtx.cipher, flushValues, flushNonce);
 
@@ -1132,7 +1128,7 @@ export async function queueUpgradePlanet(
 ): Promise<{ computationOffset: BN }> {
   const [gamePDA] = deriveGamePDA(gameId, program.programId);
 
-  const upgradeNonce = randomBytes(16);
+  const upgradeNonce = new Uint8Array(randomBytes(16));
   const upgradeNonceValue = deserializeLE(upgradeNonce);
   const { packed: upgradePacked } = encryptAndPack(encCtx.cipher, upgradeValues, upgradeNonce);
 

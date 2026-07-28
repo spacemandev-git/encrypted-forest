@@ -11,7 +11,7 @@
  * - Subscriptions (account changes, log events)
  */
 
-import { type Program, AnchorProvider } from "@coral-xyz/anchor";
+import { type Program, AnchorProvider } from "@anchor-lang/core";
 import {
   Connection,
   PublicKey,
