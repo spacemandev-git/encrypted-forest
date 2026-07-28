@@ -97,23 +97,42 @@ function cometFromByte(b: number): CometBoost {
 // ---------------------------------------------------------------------------
 
 /**
+ * 32-bit big-endian existence scan value for a property hash.
+ *
+ * Must match `existence_scan` in encrypted-ixs/src/lib.rs exactly.
+ *
+ * `hash[0]` is the high byte so a threshold of `t << 24` reproduces the old
+ * byte-granular rule `hash[0] >= t`. The low bytes are `hash[6..9]` rather
+ * than `hash[1..4]` because bytes 1-5 drive body type, size and comets --
+ * reusing them would skew the property distribution of surviving coordinates
+ * at sub-byte densities.
+ *
+ * Uses `*` and `+` rather than `<<`/`|`: JS bitwise operators are signed
+ * 32-bit, so `hash[0] << 24` goes negative for `hash[0] >= 128`.
+ */
+export function existenceScan(hash: Uint8Array): number {
+  return (
+    hash[0] * 16777216 + hash[6] * 65536 + hash[7] * 256 + hash[8]
+  );
+}
+
+/**
  * Determine celestial body properties from a planet hash and noise thresholds.
  * Returns null if the hash represents dead space.
- * Matches on-chain `determine_celestial_body` exactly.
+ * Matches the Arcis circuit's init_planet exactly.
  */
 export function determineCelestialBody(
   hash: Uint8Array,
   thresholds: NoiseThresholds
 ): CelestialBodyProperties | null {
-  const byte0 = hash[0];
   const byte1 = hash[1];
   const byte2 = hash[2];
   const byte3 = hash[3];
   const byte4 = hash[4];
   const byte5 = hash[5];
 
-  // Byte 0: dead space check
-  if (byte0 < thresholds.deadSpaceThreshold) {
+  // Bytes 0 and 6-8: dead space check
+  if (existenceScan(hash) < thresholds.deadSpaceThreshold) {
     return null;
   }
 

@@ -70,18 +70,26 @@ function cometFromByte(b: number): number {
   return (b % 6) + 1;
 }
 
+/**
+ * 32-bit big-endian existence scan value.
+ * Must match `existence_scan` in encrypted-ixs/src/lib.rs and `existenceScan`
+ * in sdk/core. Uses `*`/`+` because JS bitwise ops are signed 32-bit.
+ */
+function existenceScan(hash: Uint8Array): number {
+  return hash[0] * 16777216 + hash[6] * 65536 + hash[7] * 256 + hash[8];
+}
+
 function determineCelestialBody(
   hash: Uint8Array,
   t: NoiseThresholds
 ): CelestialBodyProperties | null {
-  const byte0 = hash[0];
   const byte1 = hash[1];
   const byte2 = hash[2];
   const byte3 = hash[3];
   const byte4 = hash[4];
   const byte5 = hash[5];
 
-  if (byte0 < t.deadSpaceThreshold) return null;
+  if (existenceScan(hash) < t.deadSpaceThreshold) return null;
 
   // Body type (threshold-based)
   let bodyType: number;

@@ -13,12 +13,61 @@
 #   Custom bridge network "arcium-net" with subnet 172.20.0.0/16
 #   Main cluster nodes:     172.20.0.100 - 172.20.0.102
 #   Trusted Dealer:         172.20.0.99
+#   MinIO (local S3):       172.20.0.98
 #
 # Usage:
-#   docker compose up -d       # Start ARX nodes
-#   docker compose down        # Stop everything
+#   docker compose up -d                    # Start everything
+#   docker compose up -d minio minio-init   # Just the local circuit bucket
+#   docker compose down                     # Stop everything
 
 services:
+  # ---------------------------------------------------------------------------
+  # MinIO - S3-compatible object store for serving compiled .arcis circuits
+  # locally (stand-in for Cloudflare R2). Comp defs are initialized with an
+  # offchain circuit source, and the ARX nodes below fetch the bytecode over
+  # HTTP from this bucket, so it lives on the same bridge network at a static
+  # IP: http://172.20.0.98:9000/<bucket>/<circuit>.arcis
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: ef-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    ports:
+      - "127.0.0.1:9000:9000" # S3 API (host-side uploads)
+      - "127.0.0.1:9001:9001" # Web console
+    volumes:
+      - minio-data:/data
+    networks:
+      arcium-net:
+        ipv4_address: 172.20.0.98
+
+  # ---------------------------------------------------------------------------
+  # One-shot: create the circuit bucket and make it anonymously readable.
+  # Arcium requires circuit files to be publicly readable without auth; the
+  # `public` policy also permits anonymous PUT, which is what lets
+  # scripts/upload-circuits.sh upload with plain curl. Local dev only.
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: ef-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 '${MINIO_ROOT_USER:-minioadmin}' '${MINIO_ROOT_PASSWORD:-minioadmin}' >/dev/null 2>&1; do
+        echo 'waiting for minio...'; sleep 1;
+      done;
+      mc mb --ignore-existing local/${CIRCUIT_BUCKET:-circuits};
+      mc anonymous set public local/${CIRCUIT_BUCKET:-circuits};
+      echo 'bucket ${CIRCUIT_BUCKET:-circuits} ready';
+      "
+    networks:
+      - arcium-net
+
   # ---------------------------------------------------------------------------
   # Arcium Trusted Dealer
   # ---------------------------------------------------------------------------
@@ -205,6 +254,9 @@ services:
     networks:
       arcium-net:
         ipv4_address: 172.20.0.102
+
+volumes:
+  minio-data:
 
 networks:
   arcium-net:

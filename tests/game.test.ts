@@ -61,7 +61,7 @@ describe("Game Creation", () => {
   it("creates a game with custom noise thresholds", async () => {
     const gameId = nextGameId();
     const customThresholds = {
-      deadSpaceThreshold: 64,
+      deadSpaceThreshold: 1_073_741_824, // 64 << 24
       planetThreshold: 200,
       quasarThreshold: 230,
       spacetimeRipThreshold: 245,
@@ -79,7 +79,7 @@ describe("Game Creation", () => {
     const gamePDA = await createGame(program, admin, config);
 
     const gameAccount = await program.account.game.fetch(gamePDA);
-    expect(gameAccount.noiseThresholds.deadSpaceThreshold).toBe(64);
+    expect(gameAccount.noiseThresholds.deadSpaceThreshold).toBe(1_073_741_824);
     expect(gameAccount.noiseThresholds.planetThreshold).toBe(200);
     expect(gameAccount.noiseThresholds.sizeThreshold1).toBe(20);
   });

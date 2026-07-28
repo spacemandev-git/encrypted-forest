@@ -4,6 +4,7 @@
 
 import { type Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
+import { DEFAULT_HASH_ROUNDS } from "../types/game.js";
 import type { Game, NoiseThresholds } from "../types/game.js";
 import { deriveGamePDA } from "../utils/pda.js";
 
@@ -41,7 +42,7 @@ function convertGame(raw: any): Game {
     whitelist: raw.whitelist,
     serverPubkey: raw.serverPubkey ?? null,
     noiseThresholds: raw.noiseThresholds as NoiseThresholds,
-    hashRounds: raw.hashRounds ?? 100,
+    hashRounds: raw.hashRounds ?? DEFAULT_HASH_ROUNDS,
   };
 }
 

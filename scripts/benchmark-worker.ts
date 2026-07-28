@@ -50,7 +50,10 @@ self.onmessage = (event: MessageEvent<WorkerTask>) => {
       }
 
       coordsProcessed++;
-      if (hash[0] >= deadSpaceThreshold) {
+      // Must match `existence_scan` in encrypted-ixs/src/lib.rs.
+      const scan =
+        hash[0] * 16777216 + hash[6] * 65536 + hash[7] * 256 + hash[8];
+      if (scan >= deadSpaceThreshold) {
         planetsFound++;
       }
     }

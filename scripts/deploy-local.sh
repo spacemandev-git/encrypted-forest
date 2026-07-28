@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
-# deploy-local.sh - Build, upload circuits to R2, and deploy Encrypted Forest to local Surfpool
+# deploy-local.sh - Build, upload circuits, and deploy Encrypted Forest to local Surfpool
+#
+# Circuit storage is chosen by env file:
+#   .env       -> Cloudflare R2 (wrangler)
+#   .env.local -> local S3 bucket (MinIO, brought up via docker compose)
+# .env.local is sourced last, so its values win when present.
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RPC_URL="${RPC_URL:-http://localhost:8899}"
-CIRCUIT_BUCKET="${CIRCUIT_BUCKET:?CIRCUIT_BUCKET env var is required}"
+
+# ---------------------------------------------------------------------------
+# Load environment
+# ---------------------------------------------------------------------------
+for ENV_FILE in "${PROJECT_ROOT}/.env" "${PROJECT_ROOT}/.env.local"; do
+  if [ -f "${ENV_FILE}" ]; then
+    echo "Loading $(basename "${ENV_FILE}") ..."
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+  fi
+done
+
+CIRCUIT_BUCKET="${CIRCUIT_BUCKET:?CIRCUIT_BUCKET env var is required (set it in .env or .env.local)}"
+CIRCUIT_S3_ENDPOINT="${CIRCUIT_S3_ENDPOINT:-}"
 
 # ---------------------------------------------------------------------------
 # Wait for RPC health
@@ -36,9 +56,47 @@ cd "${PROJECT_ROOT}"
 arcium build
 
 # ---------------------------------------------------------------------------
-# Upload circuits to R2
+# Bring up the local S3 bucket (only when CIRCUIT_S3_ENDPOINT is configured)
 # ---------------------------------------------------------------------------
-echo "Uploading .arcis circuit files to R2 bucket '${CIRCUIT_BUCKET}' ..."
+if [ -n "${CIRCUIT_S3_ENDPOINT}" ]; then
+  if ! command -v docker &>/dev/null; then
+    echo "Error: docker not found, but CIRCUIT_S3_ENDPOINT is set."
+    exit 1
+  fi
+
+  echo "Starting local S3 (MinIO) and ensuring bucket '${CIRCUIT_BUCKET}' exists ..."
+  docker compose -f "${PROJECT_ROOT}/docker-compose.yml" up -d minio minio-init
+
+  echo -n "Waiting for MinIO at ${CIRCUIT_S3_ENDPOINT} ..."
+  MINIO_RETRY=0
+  while [ $MINIO_RETRY -lt 30 ]; do
+    if curl -sf "${CIRCUIT_S3_ENDPOINT%/}/minio/health/live" > /dev/null 2>&1; then
+      echo " ready."
+      break
+    fi
+    echo -n "."
+    sleep 1
+    MINIO_RETRY=$((MINIO_RETRY + 1))
+  done
+
+  if [ $MINIO_RETRY -ge 30 ]; then
+    echo " timed out."
+    echo "Check: docker compose logs minio"
+    exit 1
+  fi
+
+  # minio-init is a one-shot; give it a moment to apply the bucket policy.
+  docker wait ef-minio-init > /dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------------------
+# Upload circuits
+# ---------------------------------------------------------------------------
+if [ -n "${CIRCUIT_S3_ENDPOINT}" ]; then
+  echo "Uploading .arcis circuit files to local bucket '${CIRCUIT_BUCKET}' ..."
+else
+  echo "Uploading .arcis circuit files to R2 bucket '${CIRCUIT_BUCKET}' ..."
+fi
 "${PROJECT_ROOT}/scripts/upload-circuits.sh"
 
 # ---------------------------------------------------------------------------
@@ -66,5 +124,11 @@ fi
 echo ""
 echo "=== Deployment Complete ==="
 echo "  RPC:      ${RPC_URL}"
-echo "  Circuits: R2 bucket '${CIRCUIT_BUCKET}'"
+if [ -n "${CIRCUIT_S3_ENDPOINT}" ]; then
+  echo "  Circuits: local S3 bucket '${CIRCUIT_BUCKET}' (${CIRCUIT_S3_ENDPOINT})"
+  echo "  Console:  http://localhost:9001"
+else
+  echo "  Circuits: R2 bucket '${CIRCUIT_BUCKET}'"
+fi
+echo "  Fetch URL: ${CIRCUIT_BASE_URL:-<unset>}/<circuit>.arcis"
 echo "  Program deployed and ready."

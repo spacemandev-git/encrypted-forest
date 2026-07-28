@@ -28,6 +28,14 @@ export type WinConditionAnchor =
  * Matches on-chain `NoiseThresholds` struct.
  */
 export interface NoiseThresholds {
+  /**
+   * Minimum 32-bit existence scan value for a coordinate to hold a body.
+   * Compared against `existenceScan(propertyHash)`. Range 0..2^32-1.
+   *
+   * Density is `(2^32 - deadSpaceThreshold) / 2^32`, and expected hashes to
+   * find one body is the reciprocal. This is the scan-difficulty knob: it is
+   * free for the MPC circuit, unlike iterated hash rounds.
+   */
   deadSpaceThreshold: number;
   planetThreshold: number;
   quasarThreshold: number;
@@ -64,7 +72,12 @@ export interface Game {
  * Default noise thresholds for testing/development.
  */
 export const DEFAULT_THRESHOLDS: NoiseThresholds = {
-  deadSpaceThreshold: 253,     // ~1% of coords have a body (was 50%)
+  // 253 << 24. Equivalent to the old byte rule `hash[0] >= 253`: 3/256 of
+  // coords hold a body (~1.17%), i.e. ~85 hashes scanned per body found.
+  // Raise this to make scanning harder; 4_294_714_651 would be ~1/17,000,
+  // matching what 200 hash rounds used to cost the client -- at no cost to
+  // the circuit.
+  deadSpaceThreshold: 4_244_635_648,
   planetThreshold: 128,
   quasarThreshold: 192,
   spacetimeRipThreshold: 224,

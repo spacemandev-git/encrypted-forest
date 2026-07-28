@@ -86,6 +86,21 @@ describe("computePlanetHash", () => {
   });
 });
 
+/**
+ * Build a hash whose 32-bit existence scan lands exactly on the dead-space
+ * threshold (live, since the check is `>=`) or one below it (dead), without
+ * touching bytes 1-5 which carry body type, size and comets.
+ */
+function hashWithExistence(live: boolean): Uint8Array {
+  const hash = new Uint8Array(32);
+  const target = DEFAULT_THRESHOLDS.deadSpaceThreshold - (live ? 0 : 1);
+  hash[0] = Math.floor(target / 16777216);
+  hash[6] = Math.floor(target / 65536) % 256;
+  hash[7] = Math.floor(target / 256) % 256;
+  hash[8] = target % 256;
+  return hash;
+}
+
 // ---------------------------------------------------------------------------
 // determineCelestialBody
 // ---------------------------------------------------------------------------
@@ -93,15 +108,13 @@ describe("computePlanetHash", () => {
 describe("determineCelestialBody", () => {
   it("should return null for dead space (byte0 < threshold)", () => {
     // Create a hash where byte0 is low
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold - 1;
+    const hash = hashWithExistence(false);
     const result = determineCelestialBody(hash, DEFAULT_THRESHOLDS);
     expect(result).toBeNull();
   });
 
   it("should return Planet type when byte1 < planetThreshold", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.planetThreshold - 1;
     hash[2] = DEFAULT_THRESHOLDS.sizeThreshold1 - 1;
     hash[3] = 0; // no comets
@@ -113,8 +126,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should return Quasar when byte1 in quasar range", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.planetThreshold; // start of quasar range
     hash[2] = 100;
     hash[3] = 0;
@@ -124,8 +136,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should return SpacetimeRip when byte1 in rip range", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.quasarThreshold; // start of rip range
     hash[2] = 100;
     hash[3] = 0;
@@ -135,8 +146,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should return AsteroidBelt when byte1 >= spacetimeRipThreshold", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.spacetimeRipThreshold; // start of asteroid belt range
     hash[2] = 100;
     hash[3] = 0;
@@ -146,8 +156,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should determine correct sizes", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.planetThreshold - 1;
     hash[3] = 0;
 
@@ -177,8 +186,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should handle comets correctly", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.planetThreshold - 1;
     hash[2] = DEFAULT_THRESHOLDS.sizeThreshold1 - 1;
 
@@ -206,8 +214,7 @@ describe("determineCelestialBody", () => {
   });
 
   it("should deduplicate second comet boost", () => {
-    const hash = new Uint8Array(32);
-    hash[0] = DEFAULT_THRESHOLDS.deadSpaceThreshold;
+    const hash = hashWithExistence(true);
     hash[1] = DEFAULT_THRESHOLDS.planetThreshold - 1;
     hash[2] = DEFAULT_THRESHOLDS.sizeThreshold1 - 1;
     hash[3] = 250; // two comets

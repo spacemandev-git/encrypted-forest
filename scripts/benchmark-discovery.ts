@@ -50,7 +50,7 @@ const defaults: BenchConfig = {
   mapRadius: 50,
   rounds: 1, // matches DEFAULT_HASH_ROUNDS in game config
   gameId: 1n,
-  deadSpaceThreshold: 204, // ~80% dead space (204/256)
+  deadSpaceThreshold: 3_422_552_064, // 204 << 24, ~80% dead space
   cores: null,
 };
 
@@ -185,7 +185,10 @@ function runSingleThreaded(
       }
 
       coordsProcessed++;
-      if (hash[0] >= deadSpaceThreshold) {
+      // Must match `existence_scan` in encrypted-ixs/src/lib.rs.
+      const scan =
+        hash[0] * 16777216 + hash[6] * 65536 + hash[7] * 256 + hash[8];
+      if (scan >= deadSpaceThreshold) {
         planetsFound++;
       }
     }
@@ -234,7 +237,7 @@ function printHeader(config: BenchConfig) {
   console.log(`Hash rounds:         ${rounds}`);
   console.log(`Game ID:             ${gameId}`);
   console.log(
-    `Dead space threshold: ${deadSpaceThreshold}/256 (${((deadSpaceThreshold / 256) * 100).toFixed(1)}% dead space)`
+    `Dead space threshold: ${deadSpaceThreshold}/2^32 (${((deadSpaceThreshold / 2 ** 32) * 100).toFixed(4)}% dead space, ~1 body per ${Math.round(2 ** 32 / (2 ** 32 - deadSpaceThreshold))} coords)`
   );
   console.log(`System cores:        ${availableParallelism()}`);
   console.log();
@@ -480,7 +483,8 @@ Options:
                        Scans (2N+1)^2 coordinates
   -r, --rounds <N>     Hash difficulty rounds (default: ${defaults.rounds})
   -g, --gameId <N>     Game ID (default: ${defaults.gameId})
-  -t, --threshold <N>  Dead space threshold 0-255 (default: ${defaults.deadSpaceThreshold})
+  -t, --threshold <N>  Dead space threshold 0..2^32-1 (default: ${defaults.deadSpaceThreshold})
+                       Body density is (2^32 - N) / 2^32
   -c, --cores <N>      Worker thread count (default: compare 1/4/8)
   --sweep              Run difficulty sweep instead of single benchmark
   -h, --help           Show this help

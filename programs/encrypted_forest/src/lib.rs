@@ -12,7 +12,7 @@ const COMP_DEF_OFFSET_PROCESS_MOVE: u32 = comp_def_offset("process_move");
 const COMP_DEF_OFFSET_FLUSH_PLANET: u32 = comp_def_offset("flush_planet");
 const COMP_DEF_OFFSET_UPGRADE_PLANET: u32 = comp_def_offset("upgrade_planet");
 
-declare_id!("8BscA3fCxbBTkNCNHSopiQ84Q4A58YYzvQkqwbUM7wqA");
+declare_id!("9rbcF85axdNmcGnjUVqxrnp5bCbvaGgUwtQjC7dKn9nf");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,6 +43,15 @@ const MOVE_CT_OFFSET: u32 = 113;
 // ---------------------------------------------------------------------------
 // Hash helper
 // ---------------------------------------------------------------------------
+
+/// Maximum `hash_rounds` a game may configure.
+///
+/// Must stay in sync with `MAX_HASH_ROUNDS` in `encrypted-ixs/src/lib.rs`. The
+/// Arcis circuit unrolls that many Keccak permutations at compile time, so a
+/// game configured above the circuit's bound would make the MXE derive a
+/// different planet hash than the client and this program.
+pub const MAX_HASH_ROUNDS: u16 = 1;
+
 pub fn compute_planet_hash(x: i64, y: i64, game_id: u64, hash_rounds: u16) -> [u8; 32] {
     let mut input = [0u8; 24];
     input[0..8].copy_from_slice(&x.to_le_bytes());
@@ -172,7 +181,10 @@ pub mod encrypted_forest {
         require!(map_diameter > 0, ErrorCode::InvalidMapDiameter);
         require!(game_speed > 0, ErrorCode::InvalidGameSpeed);
         require!(end_slot > start_slot, ErrorCode::InvalidTimeRange);
-        require!(hash_rounds >= 1, ErrorCode::InvalidHashRounds);
+        require!(
+            hash_rounds >= 1 && hash_rounds <= MAX_HASH_ROUNDS,
+            ErrorCode::InvalidHashRounds
+        );
         if whitelist {
             require!(server_pubkey.is_some(), ErrorCode::WhitelistRequiresServer);
         }
@@ -1144,7 +1156,17 @@ pub enum CometBoost {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, InitSpace)]
 pub struct NoiseThresholds {
-    pub dead_space_threshold: u8,
+    /// Minimum 32-bit existence scan value for a coordinate to hold a body.
+    ///
+    /// Compared against `existence_scan(property_hash)` in the Arcis circuit:
+    /// `hash[0]` as the high byte, then `hash[6..9]`. A threshold of `t << 24`
+    /// is equivalent to the byte-granular rule `hash[0] >= t`, so the default
+    /// `253 << 24` keeps the historical 3/256 density.
+    ///
+    /// This is the map-density knob, and density is the cheap way to buy
+    /// client-side scan difficulty -- unlike hash rounds it costs the MPC
+    /// circuit nothing. See `MAX_HASH_ROUNDS` above.
+    pub dead_space_threshold: u32,
     pub planet_threshold: u8,
     pub quasar_threshold: u8,
     pub spacetime_rip_threshold: u8,

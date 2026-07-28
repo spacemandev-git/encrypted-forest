@@ -84,6 +84,7 @@ export {
   applyDistanceDecay,
   computeLandingSlot,
   upgradeCost,
+  existenceScan,
   scanCoordinate,
   scanRange,
   findSpawnPlanet,

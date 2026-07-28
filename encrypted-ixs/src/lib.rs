@@ -123,11 +123,26 @@ mod circuits {
         [b0, b1, b2, b3, b4, b5, b6, b7]
     }
 
-    const MAX_HASH_ROUNDS: usize = 200;
+    /// Upper bound on `hash_rounds` that this circuit can evaluate.
+    ///
+    /// Arcis circuits have a fixed shape, so the loop below is fully unrolled:
+    /// the circuit always evaluates MAX_HASH_ROUNDS Keccak permutations and
+    /// then selects the result for the runtime `hash_rounds` value. Every extra
+    /// round therefore costs ~3 MB of circuit and ~7s of `arcium build`,
+    /// whether or not the running game uses it.
+    ///
+    /// At 200 this made init_planet / init_spawn_planet compile to 579 MB each
+    /// and `arcium build` never finished (single-threaded, 25+ GB RSS).
+    ///
+    /// `init_game` enforces `hash_rounds <= MAX_HASH_ROUNDS`; raising the game
+    /// limit means raising this constant and rebuilding, or the circuit will
+    /// silently derive a different planet hash than the client and the chain.
+    const MAX_HASH_ROUNDS: usize = 1;
 
     /// Compute SHA3-256 hash of (x || y || game_id) with iterated rounds.
     /// Input: 32 bytes (24 bytes of data + 8 zero padding bytes).
-    /// Must match client-side sha3PropertyHash in sdk/core.
+    /// Must match client-side computePropertyHash in sdk/core and
+    /// compute_planet_hash in the on-chain program.
     fn compute_property_hash(x: u64, y: u64, game_id: u64, hash_rounds: u64) -> [u8; 32] {
         let xb = u64_to_le_bytes(x);
         let yb = u64_to_le_bytes(y);
@@ -150,6 +165,33 @@ mod circuits {
         }
 
         hash
+    }
+
+    /// Existence scan value: a 32-bit big-endian window of the property hash.
+    ///
+    /// Compared against the game's `dead_space_threshold` to decide whether a
+    /// coordinate holds a celestial body. Widening this from a single byte to
+    /// 32 bits is what makes map density a fine-grained knob: scan difficulty
+    /// is `hashes/coord * coords/planet`, and lowering density raises the
+    /// second factor at zero cost to this circuit, whereas raising the first
+    /// (iterated hashing) costs a full Keccak permutation per round.
+    ///
+    /// `hash[0]` is the most significant byte, so a threshold of `t << 24`
+    /// reproduces the old byte-granular rule `hash[0] >= t` exactly.
+    ///
+    /// The low bytes come from `hash[6..9]`, not `hash[1..4]`: bytes 1-5 are
+    /// consumed by body type, size and comets. Reusing them would correlate
+    /// existence with properties, so once the threshold was tuned below byte
+    /// granularity the surviving coordinates would carry a skewed body-type
+    /// and size distribution. Bytes 6+ are otherwise unused.
+    ///
+    /// Uses multiplication rather than shifts: multiplication by a constant is
+    /// nearly free in MPC, while shifts lower to bit-decomposition.
+    fn existence_scan(hash: [u8; 32]) -> u64 {
+        (hash[0] as u64) * 16777216
+            + (hash[6] as u64) * 65536
+            + (hash[7] as u64) * 256
+            + (hash[8] as u64)
     }
 
     /// Determine body type from hash byte.
@@ -502,14 +544,13 @@ mod circuits {
         let hash = compute_property_hash(inp.x, inp.y, game_id, hash_rounds);
         let planet_hash_val = (hash[0] as u64) + (hash[1] as u64) * 3 + (hash[2] as u64) * 7 + (hash[3] as u64) * 11;
 
-        let byte0 = hash[0] as u64;
         let byte1 = hash[1] as u64;
         let byte2 = hash[2] as u64;
         let byte3 = hash[3] as u64;
         let byte4 = hash[4] as u64;
         let byte5 = hash[5] as u64;
 
-        let is_body: u32 = if byte0 >= dead_space_threshold { 1 } else { 0 };
+        let is_body: u32 = if existence_scan(hash) >= dead_space_threshold { 1 } else { 0 };
 
         let body_type = determine_body_type(
             byte1, planet_threshold, quasar_threshold, spacetime_rip_threshold,
@@ -566,14 +607,13 @@ mod circuits {
         let hash = compute_property_hash(inp.x, inp.y, game_id, hash_rounds);
         let planet_hash_val = (hash[0] as u64) + (hash[1] as u64) * 3 + (hash[2] as u64) * 7 + (hash[3] as u64) * 11;
 
-        let byte0 = hash[0] as u64;
         let byte1 = hash[1] as u64;
         let byte2 = hash[2] as u64;
         let byte3 = hash[3] as u64;
         let byte4 = hash[4] as u64;
         let byte5 = hash[5] as u64;
 
-        let is_body: u32 = if byte0 >= dead_space_threshold { 1 } else { 0 };
+        let is_body: u32 = if existence_scan(hash) >= dead_space_threshold { 1 } else { 0 };
 
         let body_type = determine_body_type(
             byte1, planet_threshold, quasar_threshold, spacetime_rip_threshold,
